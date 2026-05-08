@@ -1,4 +1,3 @@
-// Zeta Tokio — Hello World
 extern fn reactor_create() -> i64;
 extern fn waker_create() -> i64;
 extern fn scheduler_register_waker(epfd: i64, waker_fd: i64) -> i64;
@@ -6,32 +5,19 @@ extern fn scheduler_run_reactor(epfd: i64, timeout_ms: i64) -> i64;
 extern fn waker_consume(fd: i64) -> i64;
 extern fn waker_destroy(fd: i64);
 extern fn reactor_destroy(epfd: i64);
-extern fn monotonic_ns() -> i64;
 
 fn main() -> i64 {
-    let rt = create_runtime();
-    let result = block_on(rt);
-    destroy_runtime(rt);
-    return result;
-}
-
-fn create_runtime() -> (i64, i64) {
     let epfd = reactor_create();
     let waker = waker_create();
     scheduler_register_waker(epfd, waker);
-    return (epfd, waker);
-}
-
-fn block_on(rt: (i64, i64)) -> i64 {
-    let (epfd, waker) = rt;
-    let start = monotonic_ns();
-    scheduler_run_reactor(epfd, 50);
-    waker_consume(waker);
-    return 42;
-}
-
-fn destroy_runtime(rt: (i64, i64)) {
-    let (epfd, waker) = rt;
+    let result = run_task(epfd, waker);
     waker_destroy(waker);
     reactor_destroy(epfd);
+    return result;
+}
+
+fn run_task(epfd: i64, waker: i64) -> i64 {
+    scheduler_run_reactor(epfd, 100);
+    waker_consume(waker);
+    return 42;
 }

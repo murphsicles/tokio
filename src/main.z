@@ -1,4 +1,4 @@
-// Zeta Tokio — Runtime Demo
+// Zeta Tokio v0.2.3 — Fully wired async runtime
 extern fn reactor_create() -> i64;
 extern fn waker_create() -> i64;
 extern fn scheduler_register_waker(epfd: i64, waker_fd: i64) -> i64;
@@ -7,7 +7,6 @@ extern fn monotonic_ns() -> i64;
 extern fn waker_consume(fd: i64) -> i64;
 extern fn waker_destroy(fd: i64);
 extern fn reactor_destroy(epfd: i64);
-extern fn sleep_ms(ms: i64);
 
 fn main() -> i64 {
     let epfd = reactor_create();
