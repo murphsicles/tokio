@@ -1,8 +1,7 @@
 // tokio/src/sync/mod.z
-// Zeta Tokio — Synchronization primitives
-// Async-aware Mutex, RwLock, Barrier, Semaphore
-
 pub mod mutex;
 pub mod rwlock;
 pub mod barrier;
 pub mod semaphore;
+pub mod notify;
+pub mod watch;

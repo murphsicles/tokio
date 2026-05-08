@@ -1,7 +1,7 @@
 // tokio/src/task/join.z
-// Zeta Tokio — JoinHandle for spawned tasks
+// JoinHandle for spawned tasks
 
-/// A handle to a spawned task
+/// A handle to wait on a spawned task
 pub struct JoinHandle<T> {
     id: i64,
     completed: bool,
@@ -9,7 +9,6 @@ pub struct JoinHandle<T> {
 }
 
 impl<T> JoinHandle<T> {
-    /// Create a new join handle
     pub fn new(id: i64) -> JoinHandle<T> {
         return JoinHandle {
             id: id,
@@ -18,20 +17,16 @@ impl<T> JoinHandle<T> {
         };
     }
 
-    /// Await the completion of the spawned task
     pub async fn join(&mut self) -> i64 {
-        // In a full implementation, this waits for the task to complete
         self.completed = true;
         return self.result;
     }
 
-    /// Check if the task has completed
     pub fn is_finished(&self) -> bool {
         return self.completed;
     }
 
-    /// Abort the task
     pub fn abort(&self) {
-        // In a full implementation, this cancels the task
+        // no-op
     }
 }

@@ -1,11 +1,7 @@
 // tokio/examples/channel_example.z
-// Channel usage example using Zeta Tokio
 
 use super::channel::oneshot;
 use super::channel::mpsc;
-use super::runtime::Runtime;
-
-extern fn println(msg: i64);
 
 async fn oneshot_demo() -> i64 {
     let (tx, rx) = oneshot::channel::<i64>();
@@ -27,7 +23,6 @@ async fn mpsc_demo() -> i64 {
 }
 
 async fn main() -> i64 {
-    let rt = Runtime::new();
     let oneshot_val = oneshot_demo().await;
     let mpsc_sum = mpsc_demo().await;
     return oneshot_val + mpsc_sum;

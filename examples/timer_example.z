@@ -1,10 +1,8 @@
 // tokio/examples/timer_example.z
-// Timer/sleep example using Zeta Tokio
+// Timer example using timerfd-based sleep
 
 use super::time;
-use super::runtime::Runtime;
-
-extern fn println(msg: i64);
+use super::runtime;
 
 async fn tick_loop() -> i64 {
     let mut count: i64 = 0;
@@ -17,7 +15,7 @@ async fn tick_loop() -> i64 {
 }
 
 async fn main() -> i64 {
-    let rt = Runtime::new();
+    let rt = runtime::Runtime::new();
     let ticks = tick_loop().await;
     return ticks;
 }

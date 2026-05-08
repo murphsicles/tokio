@@ -1,0 +1,17 @@
+// tokio/examples/notify_example.z
+// Notify primitive demo
+
+use super::sync::notify::Notify;
+use super::runtime;
+
+async fn waiter(n: &Notify) -> i64 {
+    n.notified().await;
+    return 1;
+}
+
+async fn main() -> i64 {
+    let n = Notify::new();
+    // In a full impl, spawn two tasks and notify_one
+    n.notify_one();
+    return 0;
+}

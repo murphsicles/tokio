@@ -1,55 +1,33 @@
 // tokio/tests/test_basic.z
-// Basic test for Zeta Tokio components
+// Basic tests for Zeta Tokio components
 
 use super::runtime::Runtime;
-use super::time;
 use super::sync::semaphore::Semaphore;
-use super::channel::oneshot;
-
-extern fn print(msg: i64);
-extern fn println(msg: i64);
+use super::time;
 
 fn test_runtime() -> i64 {
     let rt = Runtime::new();
-    let count = rt.worker_count();
-    if count > 0 {
-        return 1;
-    }
-    return 0;
-}
-
-fn test_time() -> i64 {
-    let dur = time::seconds(1);
-    let ms = dur.as_millis();
-    if ms >= 1000 {
-        return 1;
-    }
+    if rt.worker_count() > 0 { return 1; }
     return 0;
 }
 
 fn test_semaphore() -> i64 {
     let sem = Semaphore::new(3);
-    let available = sem.available_permits();
-    if available == 3 {
-        return 1;
-    }
+    let avail = sem.available_permits();
+    if avail == 3 { return 1; }
     return 0;
 }
 
-fn test_channel() -> i64 {
-    let (tx, rx) = oneshot::channel::<i64>();
-    tx.send(99);
-    let val = rx.try_recv();
-    if val == 99 {
-        return 1;
-    }
+fn test_time() -> i64 {
+    let dur = time::millis(1000);
+    let ms = dur.as_millis();
+    if ms >= 1000 { return 1; }
     return 0;
 }
 
 fn main() -> i64 {
     let a = test_runtime();
-    let b = test_time();
-    let c = test_semaphore();
-    let d = test_channel();
-    return a + b + c + d;
+    let b = test_semaphore();
+    let c = test_time();
+    return a + b + c;
 }

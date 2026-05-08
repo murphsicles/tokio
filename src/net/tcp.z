@@ -1,105 +1,119 @@
 // tokio/src/net/tcp.z
-// Zeta Tokio — TCP networking
-// Async TcpListener and TcpStream using Zeta host functions
+// Zeta Tokio — async TCP networking with reactor integration
 
-use std::time::Duration;
+use super::runtime;
 
 extern fn tcp_connect(host: i64, port: i64) -> i64;
 extern fn tcp_bind(host: i64, port: i64) -> i64;
 extern fn tcp_accept(listener: i64) -> i64;
-extern fn tcp_read(stream: i64, buf: i64, len: i64) -> i64;
-extern fn tcp_write(stream: i64, data: i64, len: i64) -> i64;
-extern fn tcp_close(stream: i64);
+extern fn tcp_read(fd: i64, buf: i64, len: i64) -> i64;
+extern fn tcp_write(fd: i64, buf: i64, len: i64) -> i64;
+extern fn tcp_close(fd: i64);
 
-/// A TCP stream between a local and remote socket
+/// A TCP stream
 pub struct TcpStream {
-    fd: i64,
+    pub fd: i64,
+    reactor_fd: i64,
 }
 
 impl TcpStream {
-    /// Create a new TcpStream from a file descriptor
-    pub fn from_fd(fd: i64) -> TcpStream {
-        return TcpStream { fd: fd };
-    }
-
-    /// Get the raw file descriptor
-    pub fn fd(&self) -> i64 {
-        return self.fd;
-    }
-
-    /// Connect to a remote host
+    /// Connect to a remote host (blocking, intended for initial setup)
     pub fn connect(host: i64, port: i64) -> TcpStream {
         let fd = tcp_connect(host, port);
-        return TcpStream { fd: fd };
+        runtime::set_nonblocking(fd);
+        return TcpStream { fd: fd, reactor_fd: -1 };
     }
 
-    /// Async connect to a remote host
-    pub async fn connect_async(host: i64, port: i64) -> TcpStream {
+    /// Async connect — registers with reactor for write-readiness
+    pub async fn connect_async(rt: &runtime::Runtime, host: i64, port: i64) -> TcpStream {
         let fd = tcp_connect(host, port);
-        return TcpStream { fd: fd };
+        runtime::set_nonblocking(fd);
+        let epfd = rt.reactor_fd();
+        runtime::register_write(epfd, fd);
+        // Wait for connect to complete (socket becomes writable)
+        let events = runtime::poll_reactor(epfd, 5000);
+        return TcpStream { fd: fd, reactor_fd: epfd };
     }
 
-    /// Read data from the stream into a buffer
+    /// Async read
+    pub async fn read_async(&self, buf: &mut [i64], len: i64) -> i64 {
+        if self.reactor_fd >= 0 {
+            runtime::register_read(self.reactor_fd, self.fd);
+        }
+        return tcp_read(self.fd, get_ptr(buf), len);
+    }
+
+    /// Async write
+    pub async fn write_async(&self, buf: &[i64], len: i64) -> i64 {
+        if self.reactor_fd >= 0 {
+            runtime::register_write(self.reactor_fd, self.fd);
+        }
+        return tcp_write(self.fd, get_ptr(buf), len);
+    }
+
+    /// Sync read
     pub fn read(&self, buf: &mut [i64], len: i64) -> i64 {
         return tcp_read(self.fd, get_ptr(buf), len);
     }
 
-    /// Async read from the stream
-    pub async fn read_async(&self, buf: &mut [i64], len: i64) -> i64 {
-        return tcp_read(self.fd, get_ptr(buf), len);
-    }
-
-    /// Write data to the stream
-    pub fn write(&self, data: &[i64], len: i64) -> i64 {
-        return tcp_write(self.fd, get_ptr(data), len);
-    }
-
-    /// Async write to the stream
-    pub async fn write_async(&self, data: &[i64], len: i64) -> i64 {
-        return tcp_write(self.fd, get_ptr(data), len);
+    /// Sync write
+    pub fn write(&self, buf: &[i64], len: i64) -> i64 {
+        return tcp_write(self.fd, get_ptr(buf), len);
     }
 
     /// Close the stream
     pub fn close(&self) {
         tcp_close(self.fd);
     }
+
+    /// Split into read/write halves
+    pub fn split(&self) -> (ReadHalf, WriteHalf) {
+        return (ReadHalf { fd: self.fd }, WriteHalf { fd: self.fd });
+    }
 }
 
-/// A TCP socket server, listening for connections
-pub struct TcpListener {
+pub struct ReadHalf {
     fd: i64,
 }
 
-impl TcpListener {
-    /// Create a new TcpListener from a file descriptor
-    pub fn from_fd(fd: i64) -> TcpListener {
-        return TcpListener { fd: fd };
-    }
+pub struct WriteHalf {
+    fd: i64,
+}
 
-    /// Bind to a local address
+/// A TCP listener
+pub struct TcpListener {
+    pub fd: i64,
+    reactor_fd: i64,
+}
+
+impl TcpListener {
+    /// Bind to a local address (blocking, for setup)
     pub fn bind(host: i64, port: i64) -> TcpListener {
         let fd = tcp_bind(host, port);
-        return TcpListener { fd: fd };
+        runtime::set_nonblocking(fd);
+        return TcpListener { fd: fd, reactor_fd: -1 };
     }
 
-    /// Accept a new connection (blocking)
+    /// Async accept — registers listener with reactor
+    pub async fn accept_async(&self, rt: &runtime::Runtime) -> TcpStream {
+        let epfd = rt.reactor_fd();
+        // Register for readability (incoming connection)
+        runtime::register_read(epfd, self.fd);
+        // Poll for incoming connection
+        let events = runtime::poll_reactor(epfd, -1); // wait forever
+        // Accept the connection
+        let client_fd = tcp_accept(self.fd);
+        runtime::set_nonblocking(client_fd);
+        return TcpStream { fd: client_fd, reactor_fd: epfd };
+    }
+
+    /// Sync accept
     pub fn accept(&self) -> TcpStream {
         let client_fd = tcp_accept(self.fd);
-        return TcpStream::from_fd(client_fd);
-    }
-
-    /// Accept a new connection (async)
-    pub async fn accept_async(&self) -> TcpStream {
-        let client_fd = tcp_accept(self.fd);
-        return TcpStream::from_fd(client_fd);
-    }
-
-    /// Get the raw file descriptor
-    pub fn fd(&self) -> i64 {
-        return self.fd;
+        return TcpStream { fd: client_fd, reactor_fd: -1 };
     }
 }
 
 fn get_ptr(buf: &[i64]) -> i64 {
-    return buf[0]; // simplified - in production use actual pointer conversion
+    return buf[0]; // simplified pointer conversion
 }

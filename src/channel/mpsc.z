@@ -1,90 +1,51 @@
 // tokio/src/channel/mpsc.z
 // Zeta Tokio — Multi-producer, single-consumer channel
 
-use std::sync::Mutex;
-use std::collections::VecDeque;
+extern fn host_mpsc_channel() -> i64;
+extern fn host_mpsc_send(id: i64, msg: i64) -> i64;
+extern fn host_mpsc_recv(id: i64) -> i64;
+extern fn host_mpsc_try_recv(id: i64) -> i64;
 
-extern fn yield_now();
-
-/// An MPSC sender
 pub struct Sender<T> {
-    buffer: Mutex<VecDeque<i64>>,
+    id: i64,
     cap: i64,
 }
 
-/// An MPSC receiver
 pub struct Receiver<T> {
-    buffer: Mutex<VecDeque<i64>>,
-    cap: i64,
+    id: i64,
 }
 
-/// Create a new MPSC channel with bounded capacity
 pub fn channel<T>(capacity: i64) -> (Sender<T>, Receiver<T>) {
-    let sender = Sender {
-        buffer: Mutex::new(VecDeque::new()),
-        cap: capacity,
-    };
-    let receiver = Receiver {
-        buffer: Mutex::new(VecDeque::new()),
-        cap: capacity,
-    };
+    let id = host_mpsc_channel();
+    let sender = Sender { id: id, cap: capacity };
+    let receiver = Receiver { id: id };
     return (sender, receiver);
 }
 
-/// Create an unbounded MPSC channel
 pub fn unbounded_channel<T>() -> (Sender<T>, Receiver<T>) {
     return channel(0);
 }
 
 impl<T> Sender<T> {
-    /// Send a value (blocks if channel is full)
     pub async fn send(&self, value: i64) {
-        let mut buf = self.buffer.lock();
-        if self.cap > 0 && buf.len() >= self.cap {
-            // Would wait in a real implementation
-            return;
-        }
-        buf.push_back(value);
+        host_mpsc_send(self.id, value);
     }
 
-    /// Try to send without blocking
     pub fn try_send(&self, value: i64) -> i64 {
-        let mut buf = self.buffer.lock();
-        if self.cap > 0 && buf.len() >= self.cap {
-            return -1; // full
-        }
-        buf.push_back(value);
-        return 0;
-    }
-
-    /// Get the capacity
-    pub fn capacity(&self) -> i64 {
-        return self.cap;
+        return host_mpsc_send(self.id, value);
     }
 }
 
 impl<T> Receiver<T> {
-    /// Receive a value (async, waits for data)
     pub async fn recv(&self) -> i64 {
-        let mut buf = self.buffer.lock();
-        if buf.len() > 0 {
-            return buf.pop_front();
-        }
-        return 0;
+        return host_mpsc_recv(self.id);
     }
 
-    /// Try to receive without blocking
     pub fn try_recv(&self) -> i64 {
-        let mut buf = self.buffer.lock();
-        if buf.len() > 0 {
-            return buf.pop_front();
-        }
-        return 0;
+        return host_mpsc_try_recv(self.id);
     }
 
-    /// Close the receiver
     pub fn close(&self) {
-        let mut buf = self.buffer.lock();
-        buf.clear();
+        // close channel (no-op for now)
     }
 }

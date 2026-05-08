@@ -1,14 +1,12 @@
 // tokio/examples/hello_tokio.z
-// Simple example: print Hello from Zeta Tokio
 
 use super::runtime::Runtime;
-use super::time;
 
 extern fn println(msg: i64);
 
 async fn say_hello() -> i64 {
-    println(72); // 'H'
-    println(105); // 'i'
+    println(72); // H
+    println(105); // i
     return 0;
 }
 

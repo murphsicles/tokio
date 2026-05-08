@@ -1,37 +1,28 @@
 // tokio/src/signal/mod.z
-// Zeta Tokio — Signal handling
-// Ctrl+C and other OS signal handling
+// Signal handling (Ctrl+C)
 
-extern fn signal_handler(signal: i64);
+extern fn signal(sig: i64) -> i64;
 
-const SIGINT: i64 = 2;
-const SIGTERM: i64 = 15;
+pub const SIGINT: i64 = 2;
+pub const SIGTERM: i64 = 15;
 
-/// A signal that can be waited on
 pub struct Signal {
     signal: i64,
     received: bool,
 }
 
 impl Signal {
-    /// Create a new signal watcher
     pub fn new(signal: i64) -> Signal {
-        return Signal {
-            signal: signal,
-            received: false,
-        };
+        return Signal { signal: signal, received: false };
     }
 
-    /// Wait for the signal
     pub async fn recv(&mut self) -> i64 {
-        // In a full implementation, this would register with an event loop
-        // For now, it's a simplified stub
+        // In a full implementation, use signalfd + reactor
         self.received = true;
         return self.signal;
     }
 }
 
-/// Wait for Ctrl+C (SIGINT)
 pub async fn ctrl_c() -> i64 {
     let mut sig = Signal::new(SIGINT);
     return sig.recv().await;

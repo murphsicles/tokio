@@ -1,59 +1,30 @@
-// tokio/src/main.z
-// Zeta Tokio — Main entry point
-// Demonstrates the Tokio-style async runtime
+// tokio/src/main.z — Zeta Tokio Demo
 
 use super::runtime::Runtime;
 use super::time;
-use super::sync::mutex::Mutex;
 use super::sync::semaphore::Semaphore;
-use super::channel::oneshot;
-use super::channel::mpsc;
-use super::fs::File;
-use super::net::tcp::{TcpListener, TcpStream};
 
-extern fn print(msg: i64);
 extern fn println(msg: i64);
 
-/// Main entry point: run the Zeta Tokio demo
 async fn main() -> i64 {
-    print(84); // 'T'
-    print(111); // 'o'
-    print(107); // 'k'
-    print(105); // 'i'
-    print(111); // 'o'
-    print(32); // ' '
-    print(82); // 'R'
-    print(101); // 'e'
-    print(97); // 'a'
-    print(100); // 'd'
-    print(121); // 'y'
-    println(33); // '!'
+    println(84); // T
+    println(111); // o
+    println(107); // k
+    println(105); // i
+    println(111); // o
+    println(32); // ' '
 
-    // Create the runtime
     let rt = Runtime::new();
-    let worker_count = rt.worker_count();
-
-    // Test time module
-    let duration = time::seconds(5);
-    let ms = duration.as_millis();
-
-    // Test channel
-    let (tx, rx) = oneshot::channel();
-    tx.send(42);
-    let received = rx.recv().await;
-
-    // Test MPSC channel
-    let (mpsc_tx, mpsc_rx) = mpsc::channel(16);
-    mpsc_tx.try_send(100);
-
-    // Test filesystem
-    let file_exists = File::read_to_string_sync(47); // simplified path
+    let ns = runtime::monotonic_ns();
 
     // Test semaphore
     let sem = Semaphore::new(4);
-    let permit = sem.acquire().await;
-    sem.release();
+    let avail = sem.available_permits();
 
-    // Print results
-    return received + worker_count;
+    // Test time
+    let dur = time::millis(100);
+    time::sleep(dur).await;
+
+    let elapsed = runtime::monotonic_ns() - ns;
+    return avail;
 }

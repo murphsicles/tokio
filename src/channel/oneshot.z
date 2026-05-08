@@ -1,62 +1,59 @@
 // tokio/src/channel/oneshot.z
-// Zeta Tokio — One-shot channel
-// A single-producer, single-consumer channel that delivers exactly one value
+// Zeta Tokio — One-shot channel with waker support
 
-use std::sync::Mutex;
+use super::runtime;
 
-extern fn yield_now();
-
-/// A one-shot channel sender
 pub struct Sender<T> {
-    value: Mutex<i64>,
     sent: bool,
+    value: i64,
+    waker: i64,
 }
 
-/// A one-shot channel receiver
 pub struct Receiver<T> {
-    value: Mutex<i64>,
     received: bool,
+    value: i64,
+    waker: i64,
 }
 
-/// Create a new one-shot channel
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let sender = Sender {
-        value: Mutex::new(0),
-        sent: false,
-    };
-    let receiver = Receiver {
-        value: Mutex::new(0),
-        received: false,
-    };
+    let w1 = runtime::create_waker();
+    let w2 = runtime::create_waker();
+    let sender = Sender { sent: false, value: 0, waker: w1 };
+    let receiver = Receiver { received: false, value: 0, waker: w2 };
     return (sender, receiver);
 }
 
 impl<T> Sender<T> {
-    /// Send a value on the channel
-    pub fn send(&self, value: i64) -> i64 {
-        let mut val = self.value.lock();
-        val = value;
+    pub fn send(&self, value: i64) {
+        self.value = value;
         self.sent = true;
-        return 0;
+        runtime::wake_waker(self.waker);
     }
 
-    /// Check if the receiver has been dropped
     pub fn is_closed(&self) -> bool {
         return self.received;
     }
 }
 
 impl<T> Receiver<T> {
-    /// Receive a value from the channel (async)
     pub async fn recv(&self) -> i64 {
-        let val = self.value.lock();
+        while !self.sent {
+            // wait for sender
+        }
         self.received = true;
-        return val;
+        return self.value;
     }
 
-    /// Try to receive without blocking
     pub fn try_recv(&self) -> i64 {
-        let val = self.value.lock();
-        return val;
+        if self.sent {
+            return self.value;
+        }
+        return 0;
+    }
+
+    pub async fn closed(&self) {
+        while !self.sent {
+            // wait for sender to close
+        }
     }
 }

@@ -1,49 +1,63 @@
 // tokio/src/sync/semaphore.z
-// Zeta Tokio — Semaphore
-// Limits concurrent access to a resource
+// Zeta Tokio — Semaphore for limiting concurrent access
 
-use std::sync::Mutex;
+use super::runtime;
 
-/// A semaphore that limits concurrent access
+/// A semaphore for limiting concurrent access
 pub struct Semaphore {
-    permits: Mutex<i64>,
+    permits: i64,
     max_permits: i64,
+    waker: i64,
 }
 
 impl Semaphore {
-    /// Create a new semaphore with the given number of permits
+    /// Create a new semaphore with n permits
     pub fn new(permits: i64) -> Semaphore {
         return Semaphore {
-            permits: Mutex::new(permits),
-            max_permits: permits,
+            permits: if permits < 0 { 0 } else { permits },
+            max_permits: if permits < 0 { 0 } else { permits },
+            waker: runtime::create_waker(),
         };
     }
 
     /// Acquire a permit (async)
     pub async fn acquire(&self) -> SemaphorePermit {
-        let mut permits = self.permits.lock();
-        if permits > 0 {
-            permits -= 1;
+        while self.permits <= 0 {
+            // Wait for a permit (spin-wait simplified)
         }
-        return SemaphorePermit { semaphore: self };
+        self.permits = self.permits - 1;
+        return SemaphorePermit { sem: self };
     }
 
-    /// Release a permit back to the semaphore
+    /// Acquire multiple permits
+    pub async fn acquire_many(&self, n: i64) -> SemaphorePermit {
+        while self.permits < n {
+            // Wait for enough permits
+        }
+        self.permits = self.permits - n;
+        return SemaphorePermit { sem: self };
+    }
+
+    /// Add permits back
+    pub fn add_permits(&self, n: i64) {
+        self.permits = self.permits + n;
+        if self.permits > self.max_permits {
+            self.permits = self.max_permits;
+        }
+        runtime::wake_waker(self.waker);
+    }
+
+    /// Release a permit
     pub fn release(&self) {
-        let mut permits = self.permits.lock();
-        if permits < self.max_permits {
-            permits += 1;
-        }
+        self.add_permits(1);
     }
 
-    /// Get the number of available permits
+    /// Get available permits
     pub fn available_permits(&self) -> i64 {
-        let permits = self.permits.lock();
-        return permits;
+        return self.permits;
     }
 }
 
-/// A permit acquired from a semaphore
 pub struct SemaphorePermit {
-    semaphore: i64,
+    sem: i64, // reference to parent semaphore
 }

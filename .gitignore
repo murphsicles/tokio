@@ -2,3 +2,5 @@
 zeta_tokio*
 *.o
 /target/
+tokio-runtime/*.o
+zeta_tokio*

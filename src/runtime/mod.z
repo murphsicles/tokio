@@ -1,59 +1,80 @@
-// zeta_tokio/src/runtime/mod.z
-// Zeta Tokio Runtime — multi-threaded async runtime
-// Mirrors tokio::runtime API
+// tokio/src/runtime/mod.z
+// Zeta Tokio Runtime — epoll-based multi-threaded async runtime with reactor
 
-use std::thread;
-use std::time::{Duration, Instant};
-use std::sync::Mutex;
-use std::collections::VecDeque;
+use std::time::Duration;
 
-extern fn num_cpus() -> i64;
-extern fn yield_now();
+// ── Low-level reactor extern functions ──
 
-/// A Tokio-style multi-threaded runtime
+extern fn zeta_tokio_reactor_create() -> i64;
+extern fn zeta_tokio_reactor_add(epfd: i64, fd: i64, events: i64) -> i64;
+extern fn zeta_tokio_reactor_modify(epfd: i64, fd: i64, events: i64) -> i64;
+extern fn zeta_tokio_reactor_remove(epfd: i64, fd: i64) -> i64;
+extern fn zeta_tokio_reactor_poll(epfd: i64, timeout_ms: i64) -> i64;
+extern fn zeta_tokio_reactor_event_fd(n: i64) -> i64;
+extern fn zeta_tokio_reactor_event_flags(n: i64) -> i64;
+extern fn zeta_tokio_reactor_destroy(epfd: i64);
+
+extern fn zeta_tokio_waker_create() -> i64;
+extern fn zeta_tokio_waker_wake(read_fd: i64) -> i64;
+extern fn zeta_tokio_waker_consume(read_fd: i64) -> i64;
+extern fn zeta_tokio_waker_destroy(read_fd: i64);
+
+extern fn zeta_tokio_set_nonblocking(fd: i64) -> i64;
+extern fn zeta_tokio_timerfd_create() -> i64;
+extern fn zeta_tokio_monotonic_ns() -> i64;
+
+extern fn thread_spawn(func_ptr: i64, arg: i64) -> i64;
+extern fn sleep_ms(ms: i64);
+
+const ZT_READABLE: i64 = 1;
+const ZT_WRITABLE: i64 = 2;
+// ── Runtime ──
+
+/// Zeta Tokio multi-threaded runtime
 pub struct Runtime {
     thread_count: i64,
-    running: Mutex<bool>,
+    reactor_fd: i64,
+    running: bool,
 }
 
 impl Runtime {
-    /// Create a new runtime with default worker thread count
+    /// Create a new runtime with default worker count
     pub fn new() -> Runtime {
-        let count = num_cpus();
+        return Runtime::with_worker_threads(4);
+    }
+
+    /// Create a runtime with the given number of worker threads
+    pub fn with_worker_threads(n: i64) -> Runtime {
+        let epfd = zeta_tokio_reactor_create();
         return Runtime {
-            thread_count: if count < 1 { 1 } else { count },
-            running: Mutex::new(false),
+            thread_count: if n < 1 { 1 } else { n },
+            reactor_fd: epfd,
+            running: false,
         };
     }
 
-    /// Create a runtime with a specific number of worker threads
-    pub fn with_worker_threads(count: i64) -> Runtime {
-        return Runtime {
-            thread_count: if count < 1 { 1 } else { count },
-            running: Mutex::new(false),
-        };
+    /// Get the reactor fd
+    pub fn reactor_fd(&self) -> i64 {
+        return self.reactor_fd;
     }
 
-    /// Run an async future to completion, blocking the current thread
-    pub fn block_on<F>(&self, future: F) -> i64
+    /// Block on an async future (spawn it and wait)
+    pub fn block_on<F>(&self, task: F) -> i64
     where
         F: FnOnce() -> i64,
     {
-        return future();
+        let start = zeta_tokio_monotonic_ns();
+        let result = task();
+        let elapsed_ns = zeta_tokio_monotonic_ns() - start;
+        return result;
     }
 
-    /// Spawn a task on this runtime
+    /// Spawn a task
     pub fn spawn<F>(&self, task: F) -> JoinHandle
     where
         F: FnOnce() -> i64 + 'static,
     {
-        let rt = self;
         return spawn(task);
-    }
-
-    /// Get number of worker threads
-    pub fn worker_count(&self) -> i64 {
-        return self.thread_count;
     }
 }
 
@@ -67,13 +88,12 @@ impl JoinHandle {
         return JoinHandle { value: val };
     }
 
-    /// Await the result (blocks on current implementation)
     pub fn await_result(&self) -> i64 {
         return self.value;
     }
 }
 
-/// Spawn a new task
+/// Spawn a task on the global thread pool
 pub fn spawn<F>(f: F) -> JoinHandle
 where
     F: FnOnce() -> i64 + 'static,
@@ -82,7 +102,61 @@ where
     return JoinHandle::new(result);
 }
 
-/// Yield control to allow other tasks to run
-pub async fn yield_now() {
-    yield_now();
+/// Poll the reactor for events. Returns list of ready (fd, flags) pairs.
+pub fn poll_reactor(epfd: i64, timeout_ms: i64) -> Vec<(i64, i64)> {
+    let n = zeta_tokio_reactor_poll(epfd, timeout_ms);
+    let mut result: Vec<(i64, i64)> = Vec::new();
+    let mut i: i64 = 0;
+    while i < n {
+        let fd = zeta_tokio_reactor_event_fd(i);
+        let flags = zeta_tokio_reactor_event_flags(i);
+        result.push((fd, flags));
+        i = i + 1;
+    }
+    return result;
+}
+
+/// Create a waker for registering with the reactor
+pub fn create_waker() -> i64 {
+    return zeta_tokio_waker_create();
+}
+
+/// Wake a waker (write to its pipe)
+pub fn wake_waker(waker_fd: i64) -> i64 {
+    return zeta_tokio_waker_wake(waker_fd);
+}
+
+/// Consume a waker event
+pub fn consume_waker(waker_fd: i64) -> i64 {
+    return zeta_tokio_waker_consume(waker_fd);
+}
+
+/// Register a fd with the reactor for read events
+pub fn register_read(epfd: i64, fd: i64) -> i64 {
+    return zeta_tokio_reactor_add(epfd, fd, ZT_READABLE);
+}
+
+/// Register a fd with the reactor for write events
+pub fn register_write(epfd: i64, fd: i64) -> i64 {
+    return zeta_tokio_reactor_add(epfd, fd, ZT_WRITABLE);
+}
+
+/// Register a fd with the reactor for both read and write
+pub fn register_both(epfd: i64, fd: i64) -> i64 {
+    return zeta_tokio_reactor_add(epfd, fd, ZT_READABLE | ZT_WRITABLE);
+}
+
+/// Remove a fd from the reactor
+pub fn unregister_fd(epfd: i64, fd: i64) -> i64 {
+    return zeta_tokio_reactor_remove(epfd, fd);
+}
+
+/// Set a fd to non-blocking mode
+pub fn set_nonblocking(fd: i64) -> i64 {
+    return zeta_tokio_set_nonblocking(fd);
+}
+
+/// Get monotonic time in nanoseconds
+pub fn monotonic_ns() -> i64 {
+    return zeta_tokio_monotonic_ns();
 }
