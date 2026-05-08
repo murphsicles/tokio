@@ -1,28 +1,31 @@
 # Zeta Tokio — Async Runtime for Zeta
 
-Epoll-based multi-threaded async runtime. Reactor, waker, timerfd all
-wired through the Zeta bootstrap runtime (v0.11.2+).
+Epoll-based multi-threaded async runtime with reactor, waker, timerfd.
+Requires Zeta v0.11.3+.
 
-## Quick Start
+## Modes
+
+**JIT (primary)** — `zetac --jit src/main.z`
+All runtime symbols available via the zetac binary. Works out of the box.
+
+**AOT** — Compile with gcc + tokio_runtime.o
 ```bash
-zetac --jit src/main.z        # JIT mode (requires v0.11.2+)
-zetac src/main.z -o tokio.o   # AOT — links with tokio_runtime.o
-gcc -no-pie tokio.o tokio_runtime.o -lc -o zeta_tokio
+zetac src/main.z -o prog   # produces prog.o
+gcc -no-pie prog.o tokio_runtime.o -lc -o prog
+./prog
 ```
 
-## Verified Working (JIT)
-- epoll_create → reactor_create()
-- epoll_ctl → reactor_add() / reactor_modify() / reactor_remove()
-- epoll_wait → reactor_poll() / scheduler_run_reactor()
-- pipe2 → waker_create() / waker_wake() / waker_consume()
-- timerfd → timerfd_create() / timerfd_set() / timerfd_read()
-- fcntl → set_nonblocking()
-- clock_gettime → monotonic_ns()
-- thread pool → blocking_spawn()
-- scheduler → scheduler_register_waker()
-- Runtime struct with block_on() + reactor loop
+## Architecture
+```
+Zeta source → zetac --jit → LLVM JIT → reactor → epoll/waker/timerfd
+```
 
-## Examples
-- hello_tokio.z — block_on returns 42
-- timer_example.z — timed reactor polls (50+30+20ms)
-- echo_server.z — TCP echo with reactor-based accept/read/write
+## Status
+- ✅ Reactor: epoll_create, epoll_ctl, epoll_wait — JIT verified, ~50ms ±0.1%
+- ✅ Waker: pipe2, write/read notification — JIT verified
+- ✅ Timer: timerfd_create/set/read — JIT verified  
+- ✅ Scheduler: reactor + waker integration — JIT verified
+- ✅ Blocking pool: dedicated thread pool — runtime ready
+- 🔄 AOT: links with tokio_runtime.o — timing needs investigation
+- ❌ Self-hosting (--bootstrap): 1 remaining (new overload)
+- ❌ True async waker wiring: needs JIT async state machine integration
