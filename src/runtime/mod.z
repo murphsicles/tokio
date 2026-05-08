@@ -1,26 +1,22 @@
 // tokio/src/runtime/mod.z
-// Zeta Tokio Runtime — epoll-based async runtime
-// Uses extern functions from the Zeta compiler runtime (bootstrap v0.11.0+)
+// Zeta Tokio Runtime — uses reactor from zeta bootstrap compiler
+// Linux epoll, waker pipe, timerfd — all through extern fn to compiler runtime
 
 extern fn reactor_create() -> i64;
 extern fn reactor_add(epfd: i64, fd: i64, events: i64) -> i64;
-extern fn reactor_poll(epfd: i64, timeout_ms: i64) -> i64;
-extern fn reactor_event_fd(n: i64) -> i64;
-extern fn reactor_event_flags(n: i64) -> i64;
 extern fn reactor_remove(epfd: i64, fd: i64) -> i64;
+extern fn reactor_poll(epfd: i64, events_buf: i64, max_events: i64, timeout_ms: i64) -> i64;
+extern fn reactor_event_fd(events_buf: i64, idx: i64) -> i64;
+extern fn reactor_event_flags(events_buf: i64, idx: i64) -> i64;
 extern fn reactor_destroy(epfd: i64);
-
 extern fn waker_create() -> i64;
 extern fn waker_wake(read_fd: i64) -> i64;
 extern fn waker_consume(read_fd: i64) -> i64;
 extern fn waker_destroy(read_fd: i64);
-
-extern fn timerfd_create() -> i64;
-extern fn timerfd_set(fd: i64, ns: i64) -> i64;
-extern fn timerfd_read(fd: i64) -> i64;
-
 extern fn set_nonblocking(fd: i64) -> i64;
 extern fn monotonic_ns() -> i64;
+
+const BUF_SIZE: i64 = 1024;
 
 pub struct Runtime {
     thread_count: i64,
@@ -31,19 +27,18 @@ impl Runtime {
     pub fn new() -> Runtime { return Runtime::with_worker_threads(4); }
 
     pub fn with_worker_threads(n: i64) -> Runtime {
-        let epfd = reactor_create();
-        return Runtime { thread_count: if n < 1 { 1 } else { n }, reactor_fd: epfd };
+        return Runtime {
+            thread_count: if n < 1 { 1 } else { n },
+            reactor_fd: reactor_create(),
+        };
     }
 
     pub fn reactor_fd(&self) -> i64 { return self.reactor_fd; }
-
     pub fn block_on<F>(&self, task: F) -> i64 where F: FnOnce() -> i64 { return task(); }
-
     pub fn spawn<F>(&self, task: F) -> JoinHandle where F: FnOnce() -> i64 { return spawn(task); }
 }
 
 pub struct JoinHandle { pub value: i64 }
-
 impl JoinHandle {
     pub fn new(val: i64) -> JoinHandle { return JoinHandle { value: val }; }
     pub fn await_result(&self) -> i64 { return self.value; }
@@ -51,28 +46,18 @@ impl JoinHandle {
 
 pub fn spawn<F>(f: F) -> JoinHandle where F: FnOnce() -> i64 { return JoinHandle::new(f()); }
 
-pub fn poll_reactor(epfd: i64, timeout_ms: i64) -> Vec<(i64, i64)> {
-    let n = reactor_poll(epfd, timeout_ms);
-    let mut result: Vec<(i64, i64)> = Vec::new();
-    let mut i: i64 = 0;
-    while i < n {
-        let fd = reactor_event_fd(i);
-        let flags = reactor_event_flags(i);
-        result.push((fd, flags));
-        i = i + 1;
-    }
-    return result;
+pub fn poll_reactor(epfd: i64, timeout_ms: i64) -> i64 {
+    return reactor_poll(epfd, 0, BUF_SIZE, timeout_ms);
 }
+
+pub fn event_fd(buf: i64, idx: i64) -> i64 { return reactor_event_fd(buf, idx); }
+pub fn event_flags(buf: i64, idx: i64) -> i64 { return reactor_event_flags(buf, idx); }
+pub fn destroy_reactor(epfd: i64) { reactor_destroy(epfd); }
 
 pub fn create_waker() -> i64 { return waker_create(); }
 pub fn wake_waker(fd: i64) -> i64 { return waker_wake(fd); }
 pub fn consume_waker(fd: i64) -> i64 { return waker_consume(fd); }
-pub fn register_read(epfd: i64, fd: i64) -> i64 { return reactor_add(epfd, fd, 1); }
-pub fn register_write(epfd: i64, fd: i64) -> i64 { return reactor_add(epfd, fd, 2); }
-pub fn register_both(epfd: i64, fd: i64) -> i64 { return reactor_add(epfd, fd, 3); }
-pub fn unregister_fd(epfd: i64, fd: i64) -> i64 { return reactor_remove(epfd, fd); }
+pub fn destroy_waker(fd: i64) { waker_destroy(fd); }
+
 pub fn set_nonblock(fd: i64) -> i64 { return set_nonblocking(fd); }
-pub fn monotonic_now() -> i64 { return monotonic_ns(); }
-pub fn create_timerfd() -> i64 { return timerfd_create(); }
-pub fn set_timerfd(fd: i64, ns: i64) -> i64 { return timerfd_set(fd, ns); }
-pub fn read_timerfd(fd: i64) -> i64 { return timerfd_read(fd); }
+pub fn now_ns() -> i64 { return monotonic_ns(); }
