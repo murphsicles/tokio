@@ -1,21 +1,31 @@
-// tokio/examples/timer_example.z
-// Timer example using timerfd-based sleep
+// Zeta Tokio — Timer example
+extern fn reactor_create() -> i64;
+extern fn waker_create() -> i64;
+extern fn scheduler_register_waker(epfd: i64, waker_fd: i64) -> i64;
+extern fn scheduler_run_reactor(epfd: i64, timeout_ms: i64) -> i64;
+extern fn monotonic_ns() -> i64;
+extern fn waker_consume(fd: i64) -> i64;
+extern fn waker_destroy(fd: i64);
+extern fn reactor_destroy(epfd: i64);
+extern fn sleep_ms(ms: i64);
 
-use super::time;
-use super::runtime;
+fn main() -> i64 {
+    let epfd = reactor_create();
+    let waker = waker_create();
+    scheduler_register_waker(epfd, waker);
 
-async fn tick_loop() -> i64 {
-    let mut count: i64 = 0;
-    while count < 5 {
-        let dur = time::millis(500);
-        time::sleep(dur).await;
-        count = count + 1;
-    }
-    return count;
+    let t1 = timed_poll(epfd, 50);
+    let t2 = timed_poll(epfd, 30);
+    let t3 = timed_poll(epfd, 20);
+
+    waker_consume(waker);
+    waker_destroy(waker);
+    reactor_destroy(epfd);
+    return t1 + t2 + t3;
 }
 
-async fn main() -> i64 {
-    let rt = runtime::Runtime::new();
-    let ticks = tick_loop().await;
-    return ticks;
+fn timed_poll(epfd: i64, ms: i64) -> i64 {
+    let start = monotonic_ns();
+    scheduler_run_reactor(epfd, ms);
+    return (monotonic_ns() - start) / 1000;
 }

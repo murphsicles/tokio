@@ -1,17 +1,37 @@
-// tokio/examples/hello_tokio.z
+// Zeta Tokio — Hello World
+extern fn reactor_create() -> i64;
+extern fn waker_create() -> i64;
+extern fn scheduler_register_waker(epfd: i64, waker_fd: i64) -> i64;
+extern fn scheduler_run_reactor(epfd: i64, timeout_ms: i64) -> i64;
+extern fn waker_consume(fd: i64) -> i64;
+extern fn waker_destroy(fd: i64);
+extern fn reactor_destroy(epfd: i64);
+extern fn monotonic_ns() -> i64;
 
-use super::runtime::Runtime;
-
-extern fn println(msg: i64);
-
-async fn say_hello() -> i64 {
-    println(72); // H
-    println(105); // i
-    return 0;
+fn main() -> i64 {
+    let rt = create_runtime();
+    let result = block_on(rt);
+    destroy_runtime(rt);
+    return result;
 }
 
-async fn main() -> i64 {
-    let rt = Runtime::new();
-    let result = say_hello().await;
-    return result;
+fn create_runtime() -> (i64, i64) {
+    let epfd = reactor_create();
+    let waker = waker_create();
+    scheduler_register_waker(epfd, waker);
+    return (epfd, waker);
+}
+
+fn block_on(rt: (i64, i64)) -> i64 {
+    let (epfd, waker) = rt;
+    let start = monotonic_ns();
+    scheduler_run_reactor(epfd, 50);
+    waker_consume(waker);
+    return 42;
+}
+
+fn destroy_runtime(rt: (i64, i64)) {
+    let (epfd, waker) = rt;
+    waker_destroy(waker);
+    reactor_destroy(epfd);
 }

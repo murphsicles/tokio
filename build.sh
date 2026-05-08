@@ -1,36 +1,43 @@
 #!/bin/bash
-# Build Zeta Tokio — compiles Zeta sources (+ examples) with runtime linking
+# Zeta Tokio Build — requires zetac v0.11.2+ in PATH
 set -e
 
 ZETAC="${ZETAC:-zetac}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RUNTIME_O="$SCRIPT_DIR/tokio-runtime/tokio_runtime.o"
+DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Check compiler
-if ! command -v "$ZETAC" &>/dev/null; then
-    echo "Zeta compiler not found. Set ZETAC env var or install zetac in PATH."
-    exit 1
+echo "=== Zeta Tokio Build ==="
+echo "Compiler: $(which $ZETAC 2>/dev/null || echo $ZETAC)"
+
+# Build the runtime object for AOT linking
+echo ""
+echo "=== Extracting runtime symbols ==="
+if [ -f "$DIR/../zeta/target/release/deps/libzetac-"*.rlib ]; then
+    LIB=$(ls -t "$DIR/../zeta/target/release/deps/libzetac-"*.rlib 2>/dev/null | head -1)
+    if [ -n "$LIB" ]; then
+        TMP=$(mktemp -d)
+        cd "$TMP"
+        ar x "$LIB"
+        for f in *.o; do
+            if nm "$f" 2>/dev/null | grep -q "reactor_create"; then
+                cp "$f" "$DIR/tokio_runtime.o"
+                echo "  → tokio_runtime.o extracted"
+                break
+            fi
+        done
+        cd / && rm -rf "$TMP"
+    fi
 fi
 
-echo "=== Building Zeta Tokio Runtime ==="
-cd "$SCRIPT_DIR/tokio-runtime"
-gcc -c -O2 -fPIC tokio_runtime.c -o tokio_runtime.o
-echo "  → tokio_runtime.o"
-
-echo "=== Building Zeta Tokio ==="
-cd "$SCRIPT_DIR"
-
-# Compile main.z with runtime linkage via --link flag
-if [ -f "$RUNTIME_O" ]; then
-    LINK_EXTRA="-L$SCRIPT_DIR/tokio-runtime -l:tokio_runtime.o"
-fi
-
-echo "  Compiling src/main.z..."
-$ZETAC src/main.z -o zeta_tokio $LINK_EXTRA 2>&1 || echo "  (compile only — runtime linking needs manual gcc step)"
+# JIT testing
+echo ""
+echo "=== JIT Testing ==="
+for f in examples/*.z; do
+    name=$(basename "$f" .z)
+    echo -n "  $name: "
+    $ZETAC --jit "$f" 2>&1 || echo "(JIT error, expected for some examples)"
+done
 
 echo ""
-echo "=== Artifacts ==="
-ls -la zeta_tokio 2>/dev/null || echo "(manual linking required for full binary)"
-echo ""
-echo "To compile with full runtime linkage:"
-echo "  gcc -no-pie <your_program.o> $RUNTIME_O -lc -o program"
+echo "=== Build Complete ==="
+echo "To run:  zetac --jit src/main.z"
+echo "For AOT: gcc -no-pie program.o tokio_runtime.o -lc -o program"

@@ -1,31 +1,61 @@
-// tokio/examples/echo_server.z
-// TCP echo server using Zeta Tokio reactor
+extern fn reactor_create() -> i64;
+extern fn waker_create() -> i64;
+extern fn scheduler_register_waker(epfd: i64, waker_fd: i64) -> i64;
+extern fn scheduler_run_reactor(epfd: i64, timeout_ms: i64) -> i64;
+extern fn monotonic_ns() -> i64;
+extern fn waker_consume(fd: i64) -> i64;
+extern fn waker_destroy(fd: i64);
+extern fn reactor_destroy(epfd: i64);
+extern fn set_nonblocking(fd: i64) -> i64;
+extern fn tcp_bind(host: i64, port: i64) -> i64;
+extern fn tcp_accept(listener: i64) -> i64;
+extern fn tcp_read(fd: i64, buf: i64, len: i64) -> i64;
+extern fn tcp_write(fd: i64, buf: i64, len: i64) -> i64;
 
-use super::net::tcp::{TcpListener, TcpStream};
-use super::runtime;
-
-extern fn println(msg: i64);
-
-async fn handle_client(stream: TcpStream) -> i64 {
-    let mut buf: [i64; 1024] = [0; 1024];
-    let n = stream.read_async(&mut buf, 1024).await;
-    if n > 0 {
-        stream.write_async(&buf, n).await;
-    }
-    stream.close();
-    return n;
+struct Runtime {
+    epfd: i64,
+    waker_fd: i64,
 }
 
-async fn main() -> i64 {
-    let rt = runtime::Runtime::new();
-    let listener = TcpListener::bind(72, 8080);
-    println(69); // 'E'
-
-    let mut count: i64 = 0;
-    while count < 10 {
-        let stream = listener.accept_async(&rt).await;
-        let n = handle_client(stream).await;
-        count = count + 1;
+impl Runtime {
+    fn new() -> Runtime {
+        let epfd = reactor_create();
+        let waker = waker_create();
+        scheduler_register_waker(epfd, waker);
+        return Runtime { epfd: epfd, waker_fd: waker };
     }
-    return count;
+    fn shutdown(&self) {
+        waker_destroy(self.waker_fd);
+        reactor_destroy(self.epfd);
+    }
+    fn poll_io(&self, timeout_ms: i64) -> i64 {
+        return scheduler_run_reactor(self.epfd, timeout_ms);
+    }
+    fn register_io(&self, fd: i64) -> i64 {
+        extern fn reactor_add(epfd: i64, fd: i64, events: i64) -> i64;
+        return reactor_add(self.epfd, fd, 1);
+    }
+}
+
+fn main() -> i64 {
+    let rt = Runtime::new();
+    let listener = tcp_bind(0, 8080);
+    if listener < 0 { return -1; }
+    set_nonblocking(listener);
+    rt.register_io(listener);
+    let n = rt.poll_io(5000);
+    if n > 0 {
+        let client = tcp_accept(listener);
+        if client > 0 {
+            set_nonblocking(client);
+            rt.register_io(client);
+            let mut buf: [i64; 1024] = [0; 1024];
+            let len = tcp_read(client, buf[0], 1024);
+            if len > 0 {
+                tcp_write(client, buf[0], len);
+            }
+        }
+    }
+    rt.shutdown();
+    return 0;
 }

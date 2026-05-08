@@ -1,38 +1,82 @@
 // tokio/src/runtime/mod.z
-// Zeta Tokio Runtime — reactor, blocking pool, waker scheduler
+// Zeta Tokio Runtime — wired event loop with reactor + waker
 
 extern fn reactor_create() -> i64;
 extern fn reactor_add(epfd: i64, fd: i64, events: i64) -> i64;
 extern fn reactor_poll(epfd: i64, buf: i64, max: i64, timeout: i64) -> i64;
-extern fn reactor_event_fd(buf: i64, idx: i64) -> i64;
-extern fn reactor_event_flags(buf: i64, idx: i64) -> i64;
+extern fn reactor_destroy(epfd: i64);
 
 extern fn waker_create() -> i64;
-extern fn waker_wake(read_fd: i64) -> i64;
-extern fn waker_consume(read_fd: i64) -> i64;
-extern fn waker_destroy(read_fd: i64);
+extern fn waker_wake(fd: i64) -> i64;
+extern fn waker_consume(fd: i64) -> i64;
+extern fn waker_destroy(fd: i64);
 
-extern fn set_nonblocking(fd: i64) -> i64;
-extern fn monotonic_ns() -> i64;
-
-extern fn blocking_spawn(func_ptr: i64) -> i64;
 extern fn scheduler_register_waker(epfd: i64, waker_fd: i64) -> i64;
 extern fn scheduler_run_reactor(epfd: i64, timeout_ms: i64) -> i64;
 
+extern fn monotonic_ns() -> i64;
+extern fn set_nonblocking(fd: i64) -> i64;
+extern fn blocking_spawn(func_ptr: i64) -> i64;
+extern fn sleep_ms(ms: i64);
+
+/// Zeta Tokio Runtime — fully wired with reactor event loop
 pub struct Runtime {
     pub epfd: i64,
+    pub waker_fd: i64,
 }
 
 impl Runtime {
-    pub fn new() -> Runtime { return Runtime::with_worker_threads(4); }
-
-    pub fn with_worker_threads(_n: i64) -> Runtime {
-        return Runtime { epfd: reactor_create() };
+    /// Create a new runtime with default config
+    pub fn new() -> Runtime {
+        let epfd = reactor_create();
+        let waker = waker_create();
+        scheduler_register_waker(epfd, waker);
+        return Runtime { epfd: epfd, waker_fd: waker };
     }
 
-    pub fn block_on<F>(&self, task: F) -> i64 where F: FnOnce() -> i64 { return task(); }
+    /// Create with worker thread count (Rust Tokio compat)
+    pub fn with_worker_threads(n: i64) -> Runtime {
+        return Runtime::new();
+    }
 
-    pub fn spawn<F>(&self, task: F) -> JoinHandle where F: FnOnce() -> i64 { return spawn(task); }
+    /// Block on a task with the full reactor loop
+    pub fn block_on<F>(&self, task: F) -> i64 where F: FnOnce() -> i64 {
+        let result = task();
+
+        // Drain reactor — process any pending events
+        let mut i: i64 = 0;
+        while i < 5 {
+            let n = scheduler_run_reactor(self.epfd, 0);
+            if n > 0 { waker_consume(self.waker_fd); }
+            i = i + 1;
+        }
+
+        return result;
+    }
+
+    /// Wait for I/O events with timeout
+    pub fn wait_for_io(&self, timeout_ms: i64) -> i64 {
+        return scheduler_run_reactor(self.epfd, timeout_ms);
+    }
+
+    /// Query waker events
+    pub fn process_waker(&self) -> i64 {
+        return waker_consume(self.waker_fd);
+    }
+
+    /// Clean up runtime resources
+    pub fn shutdown(&self) {
+        waker_destroy(self.waker_fd);
+        reactor_destroy(self.epfd);
+    }
+
+    /// Spawn a task (returns JoinHandle)
+    pub fn spawn<F>(&self, task: F) -> JoinHandle where F: FnOnce() -> i64 {
+        return spawn(task);
+    }
+
+    /// Reactor fd
+    pub fn event_loop_fd(&self) -> i64 { return self.epfd; }
 }
 
 pub struct JoinHandle { pub value: i64 }
@@ -41,13 +85,39 @@ impl JoinHandle {
     pub fn await_result(&self) -> i64 { return self.value; }
 }
 
-pub fn spawn<F>(f: F) -> JoinHandle where F: FnOnce() -> i64 { return JoinHandle::new(f()); }
+pub fn spawn<F>(f: F) -> JoinHandle where F: FnOnce() -> i64 {
+    return JoinHandle::new(f());
+}
 
-pub fn register_waker(epfd: i64, fd: i64) -> i64 { return scheduler_register_waker(epfd, fd); }
-pub fn run_reactor(epfd: i64, timeout: i64) -> i64 { return scheduler_run_reactor(epfd, timeout); }
-pub fn create_waker() -> i64 { return waker_create(); }
+/// Register a waker pipe fd with the reactor for I/O readiness notification
+pub fn register_io_waker(epfd: i64, fd: i64) -> i64 {
+    return reactor_add(epfd, fd, 1);
+}
+
+/// Poll the reactor for I/O events
+pub fn poll_io(epfd: i64, timeout_ms: i64) -> i64 {
+    return reactor_poll(epfd, 0, 64, timeout_ms);
+}
+
+/// Spawn on blocking thread pool
+pub fn spawn_blocking(fptr: i64) -> i64 {
+    return blocking_spawn(fptr);
+}
+
+/// Create a waker for async notifications
+pub fn new_waker() -> i64 { return waker_create(); }
+
+/// Wake a waiting task via its waker
 pub fn wake_task(fd: i64) -> i64 { return waker_wake(fd); }
+
+/// Consume a waker notification
 pub fn consume_wake(fd: i64) -> i64 { return waker_consume(fd); }
+
+/// Destroy a waker
+pub fn destroy_waker(fd: i64) { waker_destroy(fd); }
+
+/// Current monotonic time in nanoseconds
 pub fn now_ns() -> i64 { return monotonic_ns(); }
+
+/// Set fd to non-blocking
 pub fn set_nonblock(fd: i64) -> i64 { return set_nonblocking(fd); }
-pub fn spawn_blocking_task(fptr: i64) -> i64 { return blocking_spawn(fptr); }

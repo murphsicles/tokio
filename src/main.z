@@ -1,30 +1,24 @@
-// tokio/src/main.z — Zeta Tokio Demo
+// Zeta Tokio — Runtime Demo
+extern fn reactor_create() -> i64;
+extern fn waker_create() -> i64;
+extern fn scheduler_register_waker(epfd: i64, waker_fd: i64) -> i64;
+extern fn scheduler_run_reactor(epfd: i64, timeout_ms: i64) -> i64;
+extern fn monotonic_ns() -> i64;
+extern fn waker_consume(fd: i64) -> i64;
+extern fn waker_destroy(fd: i64);
+extern fn reactor_destroy(epfd: i64);
+extern fn sleep_ms(ms: i64);
 
-use super::runtime::Runtime;
-use super::time;
-use super::sync::semaphore::Semaphore;
+fn main() -> i64 {
+    let epfd = reactor_create();
+    let waker = waker_create();
+    scheduler_register_waker(epfd, waker);
 
-extern fn println(msg: i64);
-
-async fn main() -> i64 {
-    println(84); // T
-    println(111); // o
-    println(107); // k
-    println(105); // i
-    println(111); // o
-    println(32); // ' '
-
-    let rt = Runtime::new();
-    let ns = runtime::monotonic_ns();
-
-    // Test semaphore
-    let sem = Semaphore::new(4);
-    let avail = sem.available_permits();
-
-    // Test time
-    let dur = time::millis(100);
-    time::sleep(dur).await;
-
-    let elapsed = runtime::monotonic_ns() - ns;
-    return avail;
+    let start = monotonic_ns();
+    scheduler_run_reactor(epfd, 100);
+    let elapsed_ms = (monotonic_ns() - start) / 1000000;
+    waker_consume(waker);
+    waker_destroy(waker);
+    reactor_destroy(epfd);
+    return elapsed_ms;
 }
