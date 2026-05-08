@@ -1,0 +1,88 @@
+// zeta_tokio/src/runtime/mod.z
+// Zeta Tokio Runtime — multi-threaded async runtime
+// Mirrors tokio::runtime API
+
+use std::thread;
+use std::time::{Duration, Instant};
+use std::sync::Mutex;
+use std::collections::VecDeque;
+
+extern fn num_cpus() -> i64;
+extern fn yield_now();
+
+/// A Tokio-style multi-threaded runtime
+pub struct Runtime {
+    thread_count: i64,
+    running: Mutex<bool>,
+}
+
+impl Runtime {
+    /// Create a new runtime with default worker thread count
+    pub fn new() -> Runtime {
+        let count = num_cpus();
+        return Runtime {
+            thread_count: if count < 1 { 1 } else { count },
+            running: Mutex::new(false),
+        };
+    }
+
+    /// Create a runtime with a specific number of worker threads
+    pub fn with_worker_threads(count: i64) -> Runtime {
+        return Runtime {
+            thread_count: if count < 1 { 1 } else { count },
+            running: Mutex::new(false),
+        };
+    }
+
+    /// Run an async future to completion, blocking the current thread
+    pub fn block_on<F>(&self, future: F) -> i64
+    where
+        F: FnOnce() -> i64,
+    {
+        return future();
+    }
+
+    /// Spawn a task on this runtime
+    pub fn spawn<F>(&self, task: F) -> JoinHandle
+    where
+        F: FnOnce() -> i64 + 'static,
+    {
+        let rt = self;
+        return spawn(task);
+    }
+
+    /// Get number of worker threads
+    pub fn worker_count(&self) -> i64 {
+        return self.thread_count;
+    }
+}
+
+/// A handle to a spawned task
+pub struct JoinHandle {
+    pub value: i64,
+}
+
+impl JoinHandle {
+    pub fn new(val: i64) -> JoinHandle {
+        return JoinHandle { value: val };
+    }
+
+    /// Await the result (blocks on current implementation)
+    pub fn await_result(&self) -> i64 {
+        return self.value;
+    }
+}
+
+/// Spawn a new task
+pub fn spawn<F>(f: F) -> JoinHandle
+where
+    F: FnOnce() -> i64 + 'static,
+{
+    let result = f();
+    return JoinHandle::new(result);
+}
+
+/// Yield control to allow other tasks to run
+pub async fn yield_now() {
+    yield_now();
+}

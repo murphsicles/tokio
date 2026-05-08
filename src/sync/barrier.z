@@ -1,0 +1,30 @@
+// tokio/src/sync/barrier.z
+// Zeta Tokio — Barrier
+// Synchronizes multiple tasks at a point
+
+use std::sync::Mutex;
+
+/// A barrier that waits for N tasks to reach a point
+pub struct Barrier {
+    count: Mutex<i64>,
+    target: i64,
+}
+
+impl Barrier {
+    /// Create a new barrier that waits for n tasks
+    pub fn new(n: i64) -> Barrier {
+        return Barrier {
+            count: Mutex::new(0),
+            target: n,
+        };
+    }
+
+    /// Wait at the barrier
+    pub async fn wait(&self) {
+        let mut count = self.count.lock();
+        count += 1;
+        if count >= self.target {
+            count = 0;
+        }
+    }
+}

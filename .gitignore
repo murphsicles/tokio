@@ -1,0 +1,4 @@
+# Zeta Tokio — Build artifacts
+zeta_tokio*
+*.o
+/target/

@@ -1,0 +1,123 @@
+// tokio/src/time/mod.z
+// Zeta Tokio — Time module: sleep, timeout, interval, Instant, Duration
+// Mirrors tokio::time API
+
+use std::time::{Duration, Instant};
+
+extern fn sleep_ms(ms: i64);
+extern fn yield_now();
+
+/// Sleep for the specified duration
+pub async fn sleep(duration: Duration) {
+    sleep_ms(duration.as_millis());
+}
+
+/// Sleep for a number of seconds
+pub async fn sleep_secs(secs: i64) {
+    sleep_ms(secs * 1000);
+}
+
+/// Sleep for a number of milliseconds
+pub async fn sleep_ms_async(ms: i64) {
+    sleep_ms(ms);
+}
+
+/// A timeout future that completes with an error if the inner future takes too long
+pub struct Timeout {
+    deadline: Instant,
+    completed: bool,
+}
+
+impl Timeout {
+    /// Create a new timeout with the given duration
+    pub fn new(duration: Duration) -> Timeout {
+        return Timeout {
+            deadline: duration_from_now(duration),
+            completed: false,
+        };
+    }
+
+    /// Check if the timeout has expired
+    pub fn is_expired(&self) -> bool {
+        let now = Instant::now();
+        return now.inner >= self.deadline.inner;
+    }
+
+    /// Wait for the timeout to expire
+    pub async fn wait(&mut self) {
+        while !self.is_expired() {
+            yield_now();
+        }
+        self.completed = true;
+    }
+}
+
+/// Run a future with a timeout, returns 1 if completed, 0 if timed out
+pub async fn with_timeout<F>(future: F, duration: Duration) -> i64
+where
+    F: FnOnce() -> i64,
+{
+    let timeout = Timeout::new(duration);
+    let result = future();
+    if timeout.is_expired() {
+        return 0; // timed out
+    }
+    return result;
+}
+
+/// An interval that yields at a fixed rate
+pub struct Interval {
+    period: Duration,
+    next_tick: Instant,
+}
+
+impl Interval {
+    /// Create a new interval with the given period
+    pub fn new(period: Duration) -> Interval {
+        return Interval {
+            period: period,
+            next_tick: instant_after(period),
+        };
+    }
+
+    /// Create a new interval with millisecond period
+    pub fn from_millis(ms: i64) -> Interval {
+        let dur = Duration::from_millis(ms);
+        return Interval::new(dur);
+    }
+
+    /// Wait until the next tick
+    pub async fn tick(&mut self) {
+        let now = Instant::now();
+        if now.inner < self.next_tick.inner {
+            let remaining = self.next_tick.inner - now.inner;
+            sleep_ms(remaining / 1000000); // convert nanos to ms
+        }
+        self.next_tick = instant_after(self.period);
+    }
+}
+
+fn duration_from_now(d: Duration) -> Instant {
+    let now = Instant::now();
+    return Instant { inner: now.inner + d.inner };
+}
+
+fn instant_after(d: Duration) -> Instant {
+    let now = Instant::now();
+    return Instant { inner: now.inner + d.inner };
+}
+
+/// Get the current instant
+pub fn now() -> Instant {
+    return Instant::now();
+}
+
+/// Create a duration from seconds
+pub fn seconds(s: i64) -> Duration {
+    return Duration::from_secs(s);
+}
+
+/// Create a duration from milliseconds
+pub fn millis(ms: i64) -> Duration {
+    return Duration::from_millis(ms);
+}

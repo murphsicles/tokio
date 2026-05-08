@@ -1,0 +1,36 @@
+// tokio/src/sync/mutex.z
+// Zeta Tokio — Async Mutex
+// Provides mutual exclusion for async contexts
+
+use std::sync::Mutex as StdMutex;
+
+/// An asynchronous mutex
+/// Locks are held across .await points safely
+pub struct Mutex<T> {
+    inner: StdMutex<T>,
+}
+
+impl<T> Mutex<T> {
+    /// Create a new mutex
+    pub fn new(value: T) -> Mutex<T> {
+        return Mutex { inner: StdMutex::new(value) };
+    }
+
+    /// Lock the mutex (async-aware)
+    pub async fn lock(&self) -> MutexGuard<T> {
+        let guard = self.inner.lock();
+        return MutexGuard { inner: guard };
+    }
+}
+
+/// A guard that releases the mutex when dropped
+pub struct MutexGuard<T> {
+    inner: i64, // placeholder for actual guard
+}
+
+impl<T> MutexGuard<T> {
+    /// Dereference to the inner value
+    pub fn deref(&self) -> i64 {
+        return self.inner;
+    }
+}

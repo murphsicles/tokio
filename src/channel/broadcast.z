@@ -1,0 +1,45 @@
+// tokio/src/channel/broadcast.z
+// Zeta Tokio — Broadcast channel
+// Fan-out: each message is sent to all receivers
+
+use std::sync::Mutex;
+use std::collections::VecDeque;
+
+/// A broadcast sender
+pub struct Sender<T> {
+    subscribers: Mutex<i64>,
+}
+
+/// A broadcast receiver
+pub struct Receiver<T> {
+    id: i64,
+}
+
+/// Create a new broadcast channel
+pub fn channel<T>(capacity: i64) -> (Sender<T>, Receiver<T>) {
+    let sender = Sender {
+        subscribers: Mutex::new(0),
+    };
+    let receiver = Receiver { id: 0 };
+    return (sender, receiver);
+}
+
+impl<T> Sender<T> {
+    /// Send a value to all receivers
+    pub async fn send(&self, value: i64) {
+        // In a full implementation, this fans out to all receivers
+    }
+
+    /// Get the number of active subscribers
+    pub fn subscriber_count(&self) -> i64 {
+        let subs = self.subscribers.lock();
+        return subs;
+    }
+}
+
+impl<T> Receiver<T> {
+    /// Receive the next value
+    pub async fn recv(&self) -> i64 {
+        return 0;
+    }
+}

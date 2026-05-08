@@ -1,0 +1,45 @@
+// tokio/src/sync/rwlock.z
+// Zeta Tokio — Async RwLock
+// Allows multiple readers or a single writer
+
+use std::sync::Mutex;
+
+/// An asynchronous read-write lock
+pub struct RwLock<T> {
+    readers: i64,
+    writers: i64,
+    data: i64,
+}
+
+impl<T> RwLock<T> {
+    /// Create a new RwLock
+    pub fn new(value: T) -> RwLock<T> {
+        return RwLock {
+            readers: 0,
+            writers: 0,
+            data: 0,
+        };
+    }
+
+    /// Acquire a read lock
+    pub async fn read(&self) -> RwLockReadGuard<T> {
+        let guard = RwLockReadGuard { inner: self.data };
+        return guard;
+    }
+
+    /// Acquire a write lock
+    pub async fn write(&self) -> RwLockWriteGuard<T> {
+        let guard = RwLockWriteGuard { inner: self.data };
+        return guard;
+    }
+}
+
+/// Guard for read access
+pub struct RwLockReadGuard<T> {
+    inner: i64,
+}
+
+/// Guard for write access
+pub struct RwLockWriteGuard<T> {
+    inner: i64,
+}

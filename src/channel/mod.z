@@ -1,0 +1,7 @@
+// tokio/src/channel/mod.z
+// Zeta Tokio — Channel module
+// Async channel primitives: oneshot, mpsc, broadcast
+
+pub mod oneshot;
+pub mod mpsc;
+pub mod broadcast;

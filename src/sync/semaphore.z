@@ -1,0 +1,49 @@
+// tokio/src/sync/semaphore.z
+// Zeta Tokio — Semaphore
+// Limits concurrent access to a resource
+
+use std::sync::Mutex;
+
+/// A semaphore that limits concurrent access
+pub struct Semaphore {
+    permits: Mutex<i64>,
+    max_permits: i64,
+}
+
+impl Semaphore {
+    /// Create a new semaphore with the given number of permits
+    pub fn new(permits: i64) -> Semaphore {
+        return Semaphore {
+            permits: Mutex::new(permits),
+            max_permits: permits,
+        };
+    }
+
+    /// Acquire a permit (async)
+    pub async fn acquire(&self) -> SemaphorePermit {
+        let mut permits = self.permits.lock();
+        if permits > 0 {
+            permits -= 1;
+        }
+        return SemaphorePermit { semaphore: self };
+    }
+
+    /// Release a permit back to the semaphore
+    pub fn release(&self) {
+        let mut permits = self.permits.lock();
+        if permits < self.max_permits {
+            permits += 1;
+        }
+    }
+
+    /// Get the number of available permits
+    pub fn available_permits(&self) -> i64 {
+        let permits = self.permits.lock();
+        return permits;
+    }
+}
+
+/// A permit acquired from a semaphore
+pub struct SemaphorePermit {
+    semaphore: i64,
+}

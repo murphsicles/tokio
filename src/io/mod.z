@@ -1,0 +1,11 @@
+// tokio/src/io/mod.z
+// Zeta Tokio — Async I/O traits and utilities
+// Mirrors tokio::io
+
+use std::time::Duration;
+use super::time;
+
+/// Split a combined value into read and write halves
+pub fn split<T>(value: T) -> (T, T) {
+    return (value, value);
+}

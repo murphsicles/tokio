@@ -1,0 +1,31 @@
+// tokio/examples/echo_server.z
+// TCP echo server using Zeta Tokio
+
+use super::net::tcp::{TcpListener, TcpStream};
+use super::runtime::Runtime;
+
+extern fn println(msg: i64);
+
+async fn handle_client(stream: TcpStream) -> i64 {
+    let mut buf: [i64; 1024] = [0; 1024];
+    let n = stream.read_async(&mut buf, 1024).await;
+    if n > 0 {
+        stream.write_async(&buf, n).await;
+    }
+    stream.close();
+    return n;
+}
+
+async fn main() -> i64 {
+    let listener = TcpListener::bind(72, 8080); // "H", port 8080
+    println(69); // 'E'
+
+    let mut count: i64 = 0;
+    while count < 10 {
+        let stream = listener.accept().await;
+        let n = handle_client(stream).await;
+        count = count + 1;
+    }
+
+    return count;
+}

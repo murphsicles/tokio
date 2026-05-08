@@ -1,0 +1,62 @@
+// tokio/src/channel/oneshot.z
+// Zeta Tokio — One-shot channel
+// A single-producer, single-consumer channel that delivers exactly one value
+
+use std::sync::Mutex;
+
+extern fn yield_now();
+
+/// A one-shot channel sender
+pub struct Sender<T> {
+    value: Mutex<i64>,
+    sent: bool,
+}
+
+/// A one-shot channel receiver
+pub struct Receiver<T> {
+    value: Mutex<i64>,
+    received: bool,
+}
+
+/// Create a new one-shot channel
+pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
+    let sender = Sender {
+        value: Mutex::new(0),
+        sent: false,
+    };
+    let receiver = Receiver {
+        value: Mutex::new(0),
+        received: false,
+    };
+    return (sender, receiver);
+}
+
+impl<T> Sender<T> {
+    /// Send a value on the channel
+    pub fn send(&self, value: i64) -> i64 {
+        let mut val = self.value.lock();
+        val = value;
+        self.sent = true;
+        return 0;
+    }
+
+    /// Check if the receiver has been dropped
+    pub fn is_closed(&self) -> bool {
+        return self.received;
+    }
+}
+
+impl<T> Receiver<T> {
+    /// Receive a value from the channel (async)
+    pub async fn recv(&self) -> i64 {
+        let val = self.value.lock();
+        self.received = true;
+        return val;
+    }
+
+    /// Try to receive without blocking
+    pub fn try_recv(&self) -> i64 {
+        let val = self.value.lock();
+        return val;
+    }
+}

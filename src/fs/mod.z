@@ -1,0 +1,101 @@
+// tokio/src/fs/mod.z
+// Zeta Tokio — Async filesystem operations
+// Mirrors tokio::fs
+
+extern fn fs_read_to_string(path: i64) -> i64;
+extern fn fs_write(path: i64, data: i64, len: i64) -> i64;
+extern fn fs_create_dir(path: i64) -> i64;
+extern fn fs_create_dir_all(path: i64) -> i64;
+extern fn fs_remove_file(path: i64) -> i64;
+extern fn fs_remove_dir(path: i64) -> i64;
+extern fn fs_rename(from: i64, to: i64) -> i64;
+extern fn fs_copy(from: i64, to: i64) -> i64;
+extern fn fs_exists(path: i64) -> i64;
+extern fn fs_is_file(path: i64) -> i64;
+extern fn fs_is_dir(path: i64) -> i64;
+extern fn fs_metadata_len(path: i64) -> i64;
+extern fn fs_read_dir(path: i64) -> i64;
+extern fn fs_canonicalize(path: i64) -> i64;
+
+/// A file handle for async operations
+pub struct File {
+    path: i64,
+    fd: i64,
+}
+
+impl File {
+    /// Open a file (async)
+    pub async fn open(path: i64) -> File {
+        return File { path: path, fd: 0 };
+    }
+
+    /// Create a file (async)
+    pub async fn create(path: i64) -> File {
+        return File { path: path, fd: 0 };
+    }
+
+    /// Read the entire file as a string (async)
+    pub async fn read_to_string(path: i64) -> i64 {
+        return fs_read_to_string(path);
+    }
+
+    /// Write bytes to a file (async)
+    pub async fn write(path: i64, data: i64, len: i64) -> i64 {
+        return fs_write(path, data, len);
+    }
+
+    /// Read a file to a string (sync convenience)
+    pub fn read_to_string_sync(path: i64) -> i64 {
+        return fs_read_to_string(path);
+    }
+
+    /// Write to a file (sync convenience)
+    pub fn write_sync(path: i64, data: i64, len: i64) -> i64 {
+        return fs_write(path, data, len);
+    }
+}
+
+/// Async filesystem operations
+pub async fn read_to_string(path: i64) -> i64 {
+    return fs_read_to_string(path);
+}
+
+pub async fn write(path: i64, data: i64, len: i64) -> i64 {
+    return fs_write(path, data, len);
+}
+
+pub async fn create_dir(path: i64) -> i64 {
+    return fs_create_dir(path);
+}
+
+pub async fn create_dir_all(path: i64) -> i64 {
+    return fs_create_dir_all(path);
+}
+
+pub async fn remove_file(path: i64) -> i64 {
+    return fs_remove_file(path);
+}
+
+pub async fn remove_dir(path: i64) -> i64 {
+    return fs_remove_dir(path);
+}
+
+pub async fn rename(from: i64, to: i64) -> i64 {
+    return fs_rename(from, to);
+}
+
+pub async fn copy(from: i64, to: i64) -> i64 {
+    return fs_copy(from, to);
+}
+
+pub fn exists(path: i64) -> i64 {
+    return fs_exists(path);
+}
+
+pub fn is_file(path: i64) -> i64 {
+    return fs_is_file(path);
+}
+
+pub fn is_dir(path: i64) -> i64 {
+    return fs_is_dir(path);
+}
