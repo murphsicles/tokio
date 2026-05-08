@@ -2,6 +2,7 @@ extern fn reactor_create() -> i64;
 extern fn waker_create() -> i64;
 extern fn scheduler_register_waker(epfd: i64, waker_fd: i64) -> i64;
 extern fn scheduler_run_reactor(epfd: i64, timeout_ms: i64) -> i64;
+extern fn monotonic_ns() -> i64;
 extern fn waker_consume(fd: i64) -> i64;
 extern fn waker_destroy(fd: i64);
 extern fn reactor_destroy(epfd: i64);
@@ -10,14 +11,9 @@ fn main() -> i64 {
     let epfd = reactor_create();
     let waker = waker_create();
     scheduler_register_waker(epfd, waker);
-    let result = run_task(epfd, waker);
-    waker_destroy(waker);
-    reactor_destroy(epfd);
-    return result;
-}
-
-fn run_task(epfd: i64, waker: i64) -> i64 {
     scheduler_run_reactor(epfd, 100);
     waker_consume(waker);
+    waker_destroy(waker);
+    reactor_destroy(epfd);
     return 42;
 }
