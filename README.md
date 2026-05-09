@@ -1,7 +1,7 @@
 # Zeta Tokio — Async Runtime for Zeta
 
 Epoll-based multi-threaded async runtime with reactor, waker, timerfd.
-Requires Zeta **v1.0.4+** (v0.13.1 bootstrap — zero error self-hosting).
+Requires Zeta **v1.0.5+** (v0.13.2 bootstrap — extern fn _N fix, echo server working).
 
 ## Modes
 
@@ -26,6 +26,6 @@ Zeta source → zetac --jit → LLVM JIT → reactor → epoll/waker/timerfd
 - ✅ Timer: timerfd_create/set/read — JIT verified  
 - ✅ Scheduler: reactor + waker integration — JIT verified
 - ✅ Blocking pool: dedicated thread pool — runtime ready
-- 🔄 AOT: links with tokio_runtime.o — timing needs investigation
-- ✅ Self-hosting (--bootstrap): **zero errors** — v0.13.1 bootstrap
+- 🟢 AOT: links with tokio_runtime.o ✅ — timing vs JIT needs investigation
+- ✅ Self-hosting (--bootstrap): **zero errors** — v0.13.2 bootstrap
 - ❌ True async waker wiring: needs JIT async state machine integration
