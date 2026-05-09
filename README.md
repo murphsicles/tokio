@@ -1,7 +1,7 @@
 # Zeta Tokio — Async Runtime for Zeta
 
 Epoll-based multi-threaded async runtime with reactor, waker, timerfd.
-Requires Zeta **v1.0.6+** (v0.13.3 bootstrap — TCP null host fix, echo server functional).
+Requires Zeta **v1.0.8+** (v0.13.5 bootstrap — multi-await, async fn main(), super resolution).
 
 ## Modes
 
