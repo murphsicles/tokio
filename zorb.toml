@@ -1,0 +1,20 @@
+[package]
+name = "@async/tokio"
+version = "0.3.10"
+edition = "2026"
+authors = ["Roy Murphy <roy@z-lang.org>"]
+description = "Epoll-based multi-threaded async runtime for Zeta with reactor, waker, timerfd"
+license = "MIT"
+repository = "https://github.com/murphsicles/tokio"
+keywords = ["async", "runtime", "tokio", "reactor", "epoll"]
+categories = ["async-runtime"]
+
+[dependencies]
+
+[fmt]
+style = "zeta-strict"
+max_width = 100
+
+[lint]
+tool = "zippy"
+level = "pedantic"

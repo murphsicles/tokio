@@ -1,7 +1,12 @@
-# Zeta Tokio — Async Runtime for Zeta
+# @async/tokio — Async Runtime for Zeta
 
 Epoll-based multi-threaded async runtime with reactor, waker, timerfd.
-Requires Zeta **v1.0.11+** (v0.14.4 bootstrap — monomorphized call resolution, waker JIT, submodule loading).
+Requires Zeta **v1.0.14+**.
+
+```toml
+[dependencies]
+@async/tokio = "0.3"
+```
 
 ## Modes
 
