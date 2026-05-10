@@ -1,0 +1,7 @@
+use super::runtime;
+
+fn main() -> i64 {
+    let epfd = runtime::reactor_create();
+    let w = runtime::waker_create();
+    return w;
+}

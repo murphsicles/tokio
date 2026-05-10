@@ -31,13 +31,13 @@ impl<T> Sender<T> {
     }
 
     pub fn is_closed(&self) -> bool {
-        return self.received;
+    return self.sent;
     }
 }
 
 impl<T> Receiver<T> {
     pub async fn recv(&self) -> i64 {
-        while !self.sent {
+        while !self.received {
             // wait for sender
         }
         self.received = true;
@@ -45,14 +45,14 @@ impl<T> Receiver<T> {
     }
 
     pub fn try_recv(&self) -> i64 {
-        if self.sent {
+        if self.received {
             return self.value;
         }
         return 0;
     }
 
     pub async fn closed(&self) {
-        while !self.sent {
+        while !self.received {
             // wait for sender to close
         }
     }

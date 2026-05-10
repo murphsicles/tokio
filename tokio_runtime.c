@@ -76,3 +76,20 @@ int64_t scheduler_run_reactor(int64_t e, int64_t t) {
     int c=0; for(int i=0;i<n;i++) if(zt_buf[i].events&EPOLLIN)
         {char b[8];read((int)zt_buf[i].data.fd,b,8);c++;} return c;
 }
+
+// ── C String Helpers ──
+static const char zt_all_ifaces[] = "0.0.0.0";
+
+int64_t cstr_all_interfaces(void) {
+    return (int64_t)&zt_all_ifaces[0];
+}
+
+// ── C String Helpers ──
+// Provide a C string "0.0.0.0" for TCP bind/connect when host is null.
+// The Zeta echo server calls tcp_bind(0, 8080) — without this, the
+// host resolves to "" which produces ":8080" (invalid address).
+
+int64_t host_str_all_interfaces(void) {
+    static const char addr[] = "0.0.0.0";
+    return (int64_t)addr;
+}

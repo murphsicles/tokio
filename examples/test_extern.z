@@ -1,0 +1,6 @@
+extern fn waker_create() -> i64;
+
+fn main() -> i64 {
+    let w = waker_create();
+    return w;
+}

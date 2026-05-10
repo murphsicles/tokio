@@ -1,0 +1,6 @@
+use super::runtime;
+
+fn main() -> i64 {
+    let w = runtime::new_waker();
+    return w;
+}

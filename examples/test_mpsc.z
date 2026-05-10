@@ -1,0 +1,11 @@
+// test_mpsc.z — mpsc channel: create + try_send + try_recv
+use super::channel::mpsc;
+
+fn main() -> i64 {
+    let (tx, rx) = mpsc::channel::<i64>(10);
+    let ok = tx.try_send(1);
+    tx.try_send(2);
+    tx.try_send(3);
+    let sum = rx.try_recv() + rx.try_recv() + rx.try_recv();
+    return sum;
+}

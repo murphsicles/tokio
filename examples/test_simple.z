@@ -1,0 +1,8 @@
+// test_simple.z — oneshot channel: send + try_recv
+use super::channel::oneshot;
+
+fn main() -> i64 {
+    let (tx, rx) = oneshot::channel::<i64>();
+    tx.send(42);
+    return rx.try_recv();
+}
