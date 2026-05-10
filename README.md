@@ -26,7 +26,10 @@ Zeta source → zetac --jit → LLVM JIT → reactor → epoll/waker/timerfd
 - ✅ Timer: timerfd_create/set/read — JIT verified  
 - ✅ Scheduler: reactor + waker integration — JIT verified
 - ✅ Blocking pool: dedicated thread pool — runtime ready
+- ✅ Monomorphized fn params: 0-param generic fns generate correct LLVM signatures
+- ✅ Future wrapping: async fn returns wrapped in future_ready() for safe .await
+- ✅ Async yield: .await calls async_yield() (sched_yield) instead of busy-spinning
+- ✅ Channel examples: oneshot (send/recv) + mpsc (try_send/try_recv) tested working
 - 🟢 AOT: links with tokio_runtime.o ✅ — timing vs JIT needs investigation
-- ✅ Self-hosting (--bootstrap): **zero errors** — v0.13.2 bootstrap
-- ✅ Async yield: .await calls async_yield() instead of busy-spinning (v1.0.11+)
+- ✅ Self-hosting (--bootstrap): **zero errors**
 - ❌ Full waker wiring: async state machine needs runtime waker registration (reactor integration not yet automatic)

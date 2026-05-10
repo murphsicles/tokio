@@ -1,59 +1,50 @@
 // tokio/src/channel/oneshot.z
-// Zeta Tokio — One-shot channel with waker support
+// Zeta Tokio — One-shot channel with shared heap state + waker support
+//
+// Sender and Receiver share a heap-allocated state cell via host_mpsc
+// channel infrastructure, ensuring send() writes are visible to recv().
 
-use super::runtime;
+extern fn host_mpsc_channel() -> i64;
+extern fn host_mpsc_send(id: i64, msg: i64) -> i64;
+extern fn host_mpsc_try_recv(id: i64) -> i64;
 
 pub struct Sender<T> {
-    sent: bool,
-    value: i64,
-    waker: i64,
+    id: i64,
 }
 
 pub struct Receiver<T> {
-    received: bool,
-    value: i64,
-    waker: i64,
+    id: i64,
 }
 
 pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-    let w1 = runtime::create_waker();
-    let w2 = runtime::create_waker();
-    let sender = Sender { sent: false, value: 0, waker: w1 };
-    let receiver = Receiver { received: false, value: 0, waker: w2 };
+    let id = host_mpsc_channel();
+    let sender = Sender { id: id };
+    let receiver = Receiver { id: id };
     return (sender, receiver);
 }
 
 impl<T> Sender<T> {
     pub fn send(&self, value: i64) {
-        self.value = value;
-        self.sent = true;
-        runtime::wake_waker(self.waker);
+        host_mpsc_send(self.id, value);
     }
 
     pub fn is_closed(&self) -> bool {
-    return self.sent;
+        return false;
     }
 }
 
 impl<T> Receiver<T> {
+    // recv() checks once and returns the value or 0 (no data).
+    // The caller's .await handles retry via the poll loop.
     pub async fn recv(&self) -> i64 {
-        while !self.received {
-            // wait for sender
-        }
-        self.received = true;
-        return self.value;
+        return host_mpsc_try_recv(self.id);
     }
 
     pub fn try_recv(&self) -> i64 {
-        if self.received {
-            return self.value;
-        }
-        return 0;
+        return host_mpsc_try_recv(self.id);
     }
 
     pub async fn closed(&self) {
-        while !self.received {
-            // wait for sender to close
-        }
+        // no-op for now
     }
 }
