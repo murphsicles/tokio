@@ -31,5 +31,4 @@ Zeta source → zetac --jit → LLVM JIT → reactor → epoll/waker/timerfd
 - ✅ Channel example returns 48 (oneshot 42 + mpsc 6) with Runtime
 - 🟢 AOT: links with tokio_runtime.o ✅ — timing vs JIT needs investigation
 - ✅ Self-hosting (--bootstrap): **zero errors**
-- ⚠️ Generic monomorphization in async context: use direct extern calls (host_mpsc_*) as workaround
-- ⚠️ Struct return from functions: known codegen bug
+- ⚠️ Struct return from functions: struct pointers returned from functions are still stack-allocated (dangling after return). Workaround: use direct extern calls for struct-like patterns.
