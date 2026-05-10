@@ -2,6 +2,10 @@
 // Zeta Tokio Runtime — wired event loop with reactor + waker
 
 extern fn reactor_create() -> i64;
+extern fn runtime_set_epfd(epfd: i64);
+extern fn runtime_get_epfd() -> i64;
+extern fn runtime_set_waker(waker: i64);
+extern fn runtime_get_waker() -> i64;
 extern fn reactor_add(epfd: i64, fd: i64, events: i64) -> i64;
 extern fn reactor_poll(epfd: i64, buf: i64, max: i64, timeout: i64) -> i64;
 extern fn reactor_destroy(epfd: i64);
@@ -27,10 +31,14 @@ pub struct Runtime {
 
 impl Runtime {
     /// Create a new runtime with default config
+    /// Registers the reactor epfd and waker in thread-local storage so
+    /// the .await lowering can automatically yield to the reactor.
     pub fn new() -> Runtime {
         let epfd = reactor_create();
         let waker = waker_create();
         scheduler_register_waker(epfd, waker);
+        runtime_set_epfd(epfd);
+        runtime_set_waker(waker);
         return Runtime { epfd: epfd, waker_fd: waker };
     }
 

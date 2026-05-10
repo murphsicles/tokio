@@ -1,28 +1,41 @@
 // tokio/examples/channel_example.z
+// Async channel example with the tokio Runtime.
+// Uses direct host_mpsc calls instead of the channel module to avoid
+// a monomorphization bug in async context.
 
-use super::channel::oneshot;
-use super::channel::mpsc;
+extern fn host_mpsc_channel() -> i64;
+extern fn host_mpsc_send(id: i64, msg: i64) -> i64;
+extern fn host_mpsc_try_recv(id: i64) -> i64;
+extern fn reactor_create() -> i64;
+extern fn waker_create() -> i64;
+extern fn scheduler_register_waker(epfd: i64, waker_fd: i64) -> i64;
+extern fn runtime_set_epfd(epfd: i64);
+extern fn runtime_set_waker(waker: i64);
 
 async fn oneshot_demo() -> i64 {
-    let (tx, rx) = oneshot::channel::<i64>();
-    tx.send(42);
-    let value = rx.recv().await;
+    let ch = host_mpsc_channel();
+    host_mpsc_send(ch, 42);
+    let value = host_mpsc_try_recv(ch);
     return value;
 }
 
 async fn mpsc_demo() -> i64 {
-    let (tx, rx) = mpsc::channel::<i64>(10);
-    tx.try_send(1);
-    tx.try_send(2);
-    tx.try_send(3);
-    let mut sum: i64 = 0;
-    sum = sum + rx.try_recv();
-    sum = sum + rx.try_recv();
-    sum = sum + rx.try_recv();
+    let ch = host_mpsc_channel();
+    host_mpsc_send(ch, 1);
+    host_mpsc_send(ch, 2);
+    host_mpsc_send(ch, 3);
+    let sum = host_mpsc_try_recv(ch) + host_mpsc_try_recv(ch) + host_mpsc_try_recv(ch);
     return sum;
 }
 
-async fn main() -> i64 {
+fn main() -> i64 {
+    // Initialize runtime and register in thread-local storage.
+    let epfd = reactor_create();
+    let waker = waker_create();
+    scheduler_register_waker(epfd, waker);
+    runtime_set_epfd(epfd);
+    runtime_set_waker(waker);
+
     let oneshot_val = oneshot_demo().await;
     let mpsc_sum = mpsc_demo().await;
     return oneshot_val + mpsc_sum;
