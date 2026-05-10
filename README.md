@@ -28,4 +28,5 @@ Zeta source → zetac --jit → LLVM JIT → reactor → epoll/waker/timerfd
 - ✅ Blocking pool: dedicated thread pool — runtime ready
 - 🟢 AOT: links with tokio_runtime.o ✅ — timing vs JIT needs investigation
 - ✅ Self-hosting (--bootstrap): **zero errors** — v0.13.2 bootstrap
-- ❌ True async waker wiring: needs JIT async state machine integration
+- ✅ Async yield: .await calls async_yield() instead of busy-spinning (v1.0.11+)
+- ❌ Full waker wiring: async state machine needs runtime waker registration (reactor integration not yet automatic)
