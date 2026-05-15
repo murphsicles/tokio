@@ -1,0 +1,3 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/fuzz.rs
+
+pub use crate::util::linked_list::tests::fuzz_linked_list;

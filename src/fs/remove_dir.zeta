@@ -1,0 +1,13 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/fs/remove_dir.rs
+
+use crate::fs::asyncify;
+use std::io;
+use std::path::Path;
+/// Removes an existing, empty directory.
+/// 
+/// This is an async version of [`std::fs::remove_dir`].
+pub fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
+ let path = path.as_ref().to_owned();
+ asyncify(move | | std::fs::remove_dir(path)).await
+}
+

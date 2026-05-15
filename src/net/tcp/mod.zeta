@@ -1,0 +1,10 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/net/tcp/mod.rs
+
+mod listener;
+cfg_not_wasip1 ! { pub(crate) mod socket; }
+mod split;
+pub use split::{ ReadHalf, WriteHalf };
+mod split_owned;
+pub use split_owned::{ OwnedReadHalf, OwnedWriteHalf, ReuniteError };
+mod stream;
+pub(crate) use stream::TcpStream;

@@ -1,0 +1,173 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/io/read_buf.rs
+
+use std::fmt;
+use std::mem::MaybeUninit;
+/// A wrapper around a byte buffer that is incrementally filled and initialized.
+/// 
+/// This type is a sort of "double cursor". It tracks three regions in the
+/// buffer: a region at the beginning of the buffer that has been logically
+/// filled with data, a region that has been initialized at some point but not
+/// yet logically filled, and a region at the end that may be uninitialized.
+/// The filled region is guaranteed to be a subset of the initialized region.
+/// 
+/// In summary, the contents of the buffer can be visualized as:
+/// 
+/// ```not_rust
+/// [ capacity ]
+/// [ filled | unfilled ]
+/// [ initialized | uninitialized ]
+/// ```
+/// 
+/// It is undefined behavior to de-initialize any bytes from the uninitialized
+/// region, since it is merely unknown whether this region is uninitialized or
+/// not, and if part of it turns out to be initialized, it must stay initialized.
+pub struct ReadBuf<a> {
+ buf: &mut [MaybeUninit<u8>],
+ filled: usize,
+ initialized: usize,
+}
+
+impl<a> ReadBuf<'a> {
+ pub fn new(buf: &mut [u8]) -> ReadBuf<'a> {
+ let initialized = buf.len();
+ let buf = unsafe { slice_to_uninit_mut(buf) };
+ ReadBuf { buf, filled: 0, initialized }
+ }
+ 
+ pub fn uninit(buf: &mut [MaybeUninit<u8>]) -> ReadBuf<'a> {
+ ReadBuf { buf, filled: 0, initialized: 0 }
+ }
+ 
+ pub fn capacity(&self) -> usize {
+ self.buf.len()
+ }
+ 
+ pub fn filled(&self) -> &[u8] {
+ let slice = &self.buf [.. self.filled];
+ unsafe { slice_assume_init(slice) }
+ }
+ 
+ pub fn filled_mut(&mut self) -> &mut [u8] {
+ let slice = &mut self.buf [.. self.filled];
+ unsafe { slice_assume_init_mut(slice) }
+ }
+ 
+ pub fn take(&mut self, n: usize) -> ReadBuf<'_> {
+ let max = std::cmp::min(self.remaining(), n);
+ unsafe { ReadBuf::uninit(&mut self.unfilled_mut() [.. max]) }
+ }
+ 
+ pub fn initialized(&self) -> &[u8] {
+ let slice = &self.buf [.. self.initialized];
+ unsafe { slice_assume_init(slice) }
+ }
+ 
+ pub fn initialized_mut(&mut self) -> &mut [u8] {
+ let slice = &mut self.buf [.. self.initialized];
+ unsafe { slice_assume_init_mut(slice) }
+ }
+ 
+ pub fn inner_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+ self.buf
+ }
+ 
+ pub fn unfilled_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+ &mut self.buf [self.filled ..]
+ }
+ 
+ pub fn initialize_unfilled(&mut self) -> &mut [u8] {
+ self.initialize_unfilled_to(self.remaining())
+ }
+ 
+ pub fn initialize_unfilled_to(&mut self, n: usize) -> &mut [u8] {
+ assert!(self.remaining() >= n, "n overflows remaining");
+ let end = self.filled + n;
+ if self.initialized<end { unsafe { self.buf [self.initialized .. end] . as_mut_ptr().write_bytes(0, end - self.initialized); } self.initialized = end; }
+ let slice = &mut self.buf [self.filled .. end];
+ unsafe { slice_assume_init_mut(slice) }
+ }
+ 
+ pub fn remaining(&self) -> usize {
+ self.capacity() - self.filled
+ }
+ 
+ pub fn clear(&mut self) {
+ self.filled = 0;
+ }
+ 
+ pub fn advance(&mut self, n: usize) {
+ let new = self.filled.checked_add(n).expect("filled overflow");
+ self.set_filled(new);
+ }
+ 
+ pub fn set_filled(&mut self, n: usize) {
+ assert!(n <= self.initialized, "filled must not become larger than initialized");
+ self.filled = n;
+ }
+ 
+ pub fn assume_init(&mut self, n: usize) {
+ let new = self.filled + n;
+ if new > self.initialized { self.initialized = new; }
+ }
+ 
+ pub fn put_slice(&mut self, buf: &[u8]) {
+ assert!(self.remaining() >= buf.len(), "buf.len() must fit in remaining(); buf.len() = {}, remaining() = {}", buf.len(), self.remaining());
+ let amt = buf.len();
+ let end = self.filled + amt;
+ unsafe { self.buf [self.filled .. end] . as_mut_ptr().cast::<u8>().copy_from_nonoverlapping(buf.as_ptr(), amt); }
+ if self.initialized < end { self.initialized = end; }
+ self.filled = end;
+ }
+ 
+}
+
+#[cfg(feature = "io-util")]
+#[cfg_attr(docsrs, doc(cfg(feature = "io-util")))]
+unsafe impl<a> bytes::BufMut for ReadBuf<'a> {
+ fn remaining_mut(&self) -> usize {
+ self.remaining()
+ }
+ 
+ fn advance_mut(&mut self, cnt: usize) {
+ unsafe { self.assume_init(cnt); }
+ self.advance(cnt);
+ }
+ 
+ fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
+ let unfilled = unsafe { self.unfilled_mut() };
+ let len = unfilled.len();
+ let ptr = unfilled.as_mut_ptr() as * mut u8;
+ unsafe { bytes::buf::UninitSlice::from_raw_parts_mut(ptr, len) }
+ }
+ 
+}
+
+impl fmt::Debug for ReadBuf<'_> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ f.debug_struct("ReadBuf").field("filled", &self.filled).field("initialized", &self.initialized).field("capacity", &self.capacity()).finish()
+ }
+ 
+}
+
+/// # Safety
+/// 
+/// The caller must ensure that `slice` is fully initialized
+/// and never writes uninitialized bytes to the returned slice.
+unsafe fn slice_to_uninit_mut(slice: &mut [u8]) -> &mut [MaybeUninit<u8>] {
+ unsafe { &mut * (slice as * mut [u8] as * mut [MaybeUninit<u8>]) }
+}
+
+/// # Safety
+/// 
+/// The caller must ensure that `slice` is fully initialized.
+unsafe fn slice_assume_init(slice: &[MaybeUninit<u8>]) -> &[u8] {
+ unsafe { &* (slice as * const [MaybeUninit<u8>] as * const [u8]) }
+}
+
+/// # Safety
+/// 
+/// The caller must ensure that `slice` is fully initialized.
+unsafe fn slice_assume_init_mut(slice: &mut [MaybeUninit<u8>]) -> &mut [u8] {
+ unsafe { &mut * (slice as * mut [MaybeUninit<u8>] as * mut [u8]) }
+}
+

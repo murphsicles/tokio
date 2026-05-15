@@ -1,0 +1,327 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/task/mod.rs
+
+mod core;
+use self::core::Cell;
+use self::core::Header;
+mod error;
+pub use self::error::JoinError;
+mod harness;
+use self::harness::Harness;
+mod id;
+pub use id::{ id, try_id, Id };
+#[cfg(feature = "rt")]
+mod abort;
+mod join;
+#[cfg(feature = "rt")] pub use self::abort::AbortHandle;
+pub use self::join::JoinHandle;
+mod list;
+pub(crate) use self::list::{ LocalOwnedTasks, OwnedTasks };
+mod raw;
+pub(crate) use self::raw::RawTask;
+mod state;
+use self::state::State;
+mod waker;
+pub(crate) use self::spawn_location::SpawnLocation;
+cfg_taskdump ! { pub(crate) mod trace; }
+use crate::future::Future;
+use crate::util::linked_list;
+use crate::util::sharded_list;
+use crate::runtime::TaskCallback;
+use std::marker::PhantomData;
+use std::panic::Location;
+use std::ptr::NonNull;
+use std::{ fmt, mem };
+/// An owned handle to the task, tracked by ref count.
+#[repr(transparent)]
+struct Task<S: static> {
+ raw: RawTask,
+ _p: PhantomData<S>,
+}
+
+unsafe impl<S> Send for Task<S> {
+}
+
+unsafe impl<S> Sync for Task<S> {
+}
+
+/// A task was notified.
+#[repr(transparent)]
+struct Notified<S: static> {
+ (Task<S>),
+}
+
+impl<S> Notified<S> {
+ fn task_meta(&self) -> crate::runtime::TaskMeta<'meta> {
+ self.0.task_meta()
+ }
+ 
+}
+
+unsafe impl<S: Schedule> Send for Notified<S> {
+}
+
+unsafe impl<S: Schedule> Sync for Notified<S> {
+}
+
+/// A non-Send variant of Notified with the invariant that it is on a thread
+/// where it is safe to poll it.
+#[repr(transparent)]
+struct LocalNotified<S: static> {
+ task: Task<S>,
+ _not_send: PhantomData<*const()>,
+}
+
+impl<S> LocalNotified<S> {
+ fn task_meta(&self) -> crate::runtime::TaskMeta<'meta> {
+ self.task.task_meta()
+ }
+ 
+}
+
+/// A task that is not owned by any `OwnedTasks`. Used for blocking tasks.
+/// This type holds two ref-counts.
+struct UnownedTask<S: static> {
+ raw: RawTask,
+ _p: PhantomData<S>,
+}
+
+unsafe impl<S> Send for UnownedTask<S> {
+}
+
+unsafe impl<S> Sync for UnownedTask<S> {
+}
+
+type Result<T> = std::result::Result<T, JoinError>;
+
+/// Hooks for scheduling tasks which are needed in the task harness.
+#[derive(Clone)]
+struct TaskHarnessScheduleHooks {
+ task_terminate_callback: Option<TaskCallback>,
+}
+
+trait Schedule {
+ fn release(&self, task: &Task<Self>) -> Option<Task<Self>>;
+ fn schedule(&self, task: Notified<Self>);
+ fn hooks(&self) -> TaskHarnessScheduleHooks;
+ fn yield_now(&self, task: Notified<Self>);
+ fn unhandled_panic(&self)
+}
+
+cfg_rt ! { #[doc = " This is the constructor for a new task. Three references to the task are"] #[doc = " created. The first task reference is usually put into an `OwnedTasks`"] #[doc = " immediately. The Notified is sent to the scheduler as an ordinary"] #[doc = " notification."] fn new_task<T, S>(task: T, scheduler: S, id: Id, spawned_at: SpawnLocation ) ->(Task<S>, Notified<S>, JoinHandle<T::Output>) where S: Schedule, T: Future + 'static, T::Output: 'static, { let raw = RawTask::new::<T, S>(task, scheduler, id, spawned_at ); let task = Task { raw, _p: PhantomData }; let notified = Notified(Task { raw, _p: PhantomData }); let join = JoinHandle::new(raw); (task, notified, join) } #[doc = " Creates a new task with an associated join handle. This method is used"] #[doc = " only when the task is not going to be stored in an `OwnedTasks` list."] #[doc = ""] #[doc = " Currently only blocking tasks use this method."] pub(crate) fn unowned<T, S>(task: T, scheduler: S, id: Id, spawned_at: SpawnLocation ) ->(UnownedTask<S>, JoinHandle<T::Output>) where S: Schedule, T: Send + Future + 'static, T::Output: Send + 'static, { let(task, notified, join) = new_task(task, scheduler, id, spawned_at ); let unowned = UnownedTask { raw: task.raw, _p: PhantomData }; std::mem::forget(task); std::mem::forget(notified); (unowned, join) } }
+impl<S: static> Task<S> {
+ fn new(raw: RawTask) -> Task<S> {
+ Task { raw, _p: PhantomData }
+ }
+ 
+ fn from_raw(ptr: NonNull<Header>) -> Task<S> {
+ unsafe { Task::new(RawTask::from_raw(ptr)) }
+ }
+ 
+ fn as_raw(&self) -> RawTask {
+ self.raw
+ }
+ 
+ fn header(&self) -> &Header {
+ self.raw.header()
+ }
+ 
+ fn header_ptr(&self) -> NonNull<Header> {
+ self.raw.header_ptr()
+ }
+ 
+ fn id(&self) -> crate::task::Id {
+ unsafe { Header::get_id(self.raw.header_ptr()) }
+ }
+ 
+ fn spawned_at(&self) -> &Location<'static> {
+ unsafe { Header::get_spawn_location(self.raw.header_ptr()) }
+ }
+ 
+ fn task_meta(&self) -> crate::runtime::TaskMeta<'meta> {
+ crate::runtime::TaskMeta { id: self.id(), spawned_at: self.spawned_at().into(), _phantom: PhantomData }
+ }
+ 
+ // [unsupported impl item]
+}
+
+impl<S: static> Notified<S> {
+ fn header(&self) -> &Header {
+ self.0.header()
+ }
+ 
+ fn task_id(&self) -> crate::task::Id {
+ self.0.id()
+ }
+ 
+}
+
+impl<S: static> Notified<S> {
+ fn from_raw(ptr: RawTask) -> Notified<S> {
+ Notified(unsafe { Task::new(ptr) })
+ }
+ 
+}
+
+impl<S: static> Notified<S> {
+ fn into_raw(self) -> RawTask {
+ let raw = self.0.raw;
+ mem::forget(self);
+ raw
+ }
+ 
+}
+
+impl<S: Schedule> Task<S> {
+ fn shutdown(self) {
+ let raw = self.raw;
+ mem::forget(self);
+ raw.shutdown();
+ }
+ 
+}
+
+impl<S: Schedule> LocalNotified<S> {
+ fn run(self) {
+ let raw = self.task.raw;
+ mem::forget(self);
+ raw.poll();
+ }
+ 
+}
+
+impl<S: Schedule> UnownedTask<S> {
+ fn into_notified(self) -> Notified<S> {
+ Notified(self.into_task())
+ }
+ 
+ fn into_task(self) -> Task<S> {
+ let task = Task { raw: self.raw, _p: PhantomData };
+ mem::forget(self);
+ task.header().state.ref_dec();
+ task
+ }
+ 
+ fn run(self) {
+ let raw = self.raw;
+ mem::forget(self);
+ let task = Task::<S> { raw, _p: PhantomData };
+ raw.poll();
+ drop(task);
+ }
+ 
+ fn shutdown(self) {
+ self.into_task().shutdown();
+ }
+ 
+}
+
+impl<S: static> Drop for Task<S> {
+ fn drop(&mut self) {
+ if self.header().state.ref_dec() { self.raw.dealloc(); }
+ }
+ 
+}
+
+impl<S: static> Drop for UnownedTask<S> {
+ fn drop(&mut self) {
+ if self.raw.header().state.ref_dec_twice() { self.raw.dealloc(); }
+ }
+ 
+}
+
+impl<S> fmt::Debug for Task<S> {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ write!(fmt, "Task({:p})", self.header())
+ }
+ 
+}
+
+impl<S> fmt::Debug for Notified<S> {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ write!(fmt, "task::Notified({:p})", self.0.header())
+ }
+ 
+}
+
+/// # Safety
+/// 
+/// Tasks are pinned.
+unsafe impl<S> linked_list::Link for Task<S> {
+ type Handle = Task<S>;
+ type Target = Header;
+ fn as_raw(handle: &Task<S>) -> NonNull<Header> {
+ handle.raw.header_ptr()
+ }
+ 
+ fn from_raw(ptr: NonNull<Header>) -> Task<S> {
+ unsafe { Task::from_raw(ptr) }
+ }
+ 
+ fn pointers(target: NonNull<Header>) -> NonNull<linked_list::Pointers<Header>> {
+ unsafe { self::core::Trailer::addr_of_owned(Header::get_trailer(target)) }
+ }
+ 
+}
+
+/// # Safety
+/// 
+/// The id of a task is never changed after creation of the task, so the return value of
+/// `get_shard_id` will not change. (The cast may throw away the upper 32 bits of the task id, but
+/// the shard id still won't change from call to call.)
+unsafe impl<S> sharded_list::ShardedListItem for Task<S> {
+ fn get_shard_id(target: NonNull<Self::Target>) -> usize {
+ let task_id = unsafe { Header::get_id(target) };
+ task_id.0.get() as usize
+ }
+ 
+}
+
+/// Wrapper around [`std::panic::Location`] that's conditionally compiled out
+/// when `tokio_unstable` is not enabled.
+#[cfg(tokio_unstable)]
+mod spawn_location {
+ use std::panic::Location;
+ #[derive(Copy, Clone)]
+ struct SpawnLocation {
+ (&Location<'static>),
+ }
+ 
+ impl From<&Location<'static>> for SpawnLocation {
+ fn from(location: &Location<'static>) -> Self {
+ Self(location)
+ }
+ 
+ }
+ 
+}
+
+#[cfg(not(tokio_unstable))]
+mod spawn_location {
+ use std::panic::Location;
+ #[derive(Copy, Clone)]
+ struct SpawnLocation {
+ (),
+ }
+ 
+ impl From<&Location<'static>> for SpawnLocation {
+ fn from(_: &Location<'static>) -> Self {
+ Self()
+ }
+ 
+ }
+ 
+ #[cfg(test)]
+ #[test]
+ fn spawn_location_is_zero_sized() {
+ assert_eq!(std::mem::size_of::<SpawnLocation>(), 0);
+ }
+ 
+}
+
+impl SpawnLocation {
+ fn capture() -> Self {
+ Self::from(Location::caller())
+ }
+ 
+}
+

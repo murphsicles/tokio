@@ -1,0 +1,16 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/multi_thread/trace_mock.rs
+
+struct TraceStatus {
+}
+
+impl TraceStatus {
+ fn new(_: usize) -> Self {
+ Self { }
+ }
+ 
+ fn trace_requested(&self) -> bool {
+ false
+ }
+ 
+}
+

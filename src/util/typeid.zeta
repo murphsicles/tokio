@@ -1,0 +1,24 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/util/typeid.rs
+
+use std::{ any::TypeId, marker::PhantomData, mem::{ self, ManuallyDrop } };
+unsafe fn try_transmute<Src, Target: static>(x: Src) -> Result<Target, Src> {
+ if nonstatic_typeid::<Src>() == TypeId::of::<Target>() { let x = ManuallyDrop::new(x); Ok(unsafe { mem::transmute_copy::<Src, Target>(&x) }) } else { Err(x) }
+}
+
+#[inline(always)]
+fn nonstatic_typeid<T>() -> TypeId where T: Sized {
+ trait NonStaticAny {
+ fn get_type_id(&self) -> TypeId where Self: static;
+ }
+ 
+ impl<T: Sized> NonStaticAny for PhantomData<T> {
+ fn get_type_id(&self) -> TypeId {
+ TypeId::of::<T>()
+ }
+ 
+ }
+ 
+ let phantom_data = PhantomData::<T>;
+ NonStaticAny::get_type_id(unsafe { mem::transmute::<&dyn NonStaticAny, & (dyn NonStaticAny + 'static)>(&phantom_data) })
+}
+

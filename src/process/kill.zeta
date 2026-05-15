@@ -1,0 +1,15 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/process/kill.rs
+
+use std::io;
+/// An interface for killing a running process.
+trait Kill {
+ fn kill(&mut self) -> io::Result<()>
+}
+
+impl<T: Kill> Kill for &mut T {
+ fn kill(&mut self) -> io::Result<()> {
+ (* *self).kill()
+ }
+ 
+}
+

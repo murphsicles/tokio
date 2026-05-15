@@ -1,0 +1,16 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/sync/mpsc/mod.rs
+
+mod block;
+mod bounded;
+pub use self::bounded::{ channel, OwnedPermit, Permit, PermitIterator, Receiver, Sender, WeakSender };
+mod chan;
+mod list;
+mod unbounded;
+pub use self::unbounded::{ unbounded_channel, UnboundedReceiver, UnboundedSender, WeakUnboundedSender };
+pub mod error;
+const BLOCK_CAP: usize = 32;
+
+const BLOCK_CAP: usize = 16;
+
+const BLOCK_CAP: usize = 2;
+

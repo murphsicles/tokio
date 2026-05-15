@@ -1,0 +1,117 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/io/interest.rs
+
+use crate::io::ready::Ready;
+use std::fmt;
+use std::ops;
+const READABLE: usize = 0b0001;
+
+const WRITABLE: usize = 0b0010;
+
+const AIO: usize = 0b0100;
+
+const LIO: usize = 0b1000;
+
+const PRIORITY: usize = 0b0001_0000;
+
+const ERROR: usize = 0b0010_0000;
+
+/// Readiness event interest.
+/// 
+/// Specifies the readiness events the caller is interested in when awaiting on
+/// I/O resource readiness states.
+#[cfg_attr(docsrs, doc(cfg(feature = "net")))]
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct Interest {
+ (usize),
+}
+
+impl Interest {
+ // [unsupported impl item]
+ const READABLE: Interest = Interest(READABLE);
+ const WRITABLE: Interest = Interest(WRITABLE);
+ const ERROR: Interest = Interest(ERROR);
+ const PRIORITY: Interest = Interest(PRIORITY);
+ pub fn is_readable(self) -> bool {
+ self.0 &READABLE != 0
+ }
+ 
+ pub fn is_writable(self) -> bool {
+ self.0 &WRITABLE != 0
+ }
+ 
+ pub fn is_error(self) -> bool {
+ self.0 &ERROR != 0
+ }
+ 
+ fn is_aio(self) -> bool {
+ self.0 &AIO != 0
+ }
+ 
+ fn is_lio(self) -> bool {
+ self.0 &LIO != 0
+ }
+ 
+ pub fn is_priority(self) -> bool {
+ self.0 &PRIORITY != 0
+ }
+ 
+ pub fn add(self, other: Interest) -> Interest {
+ Self(self.0 | other.0)
+ }
+ 
+ pub fn remove(self, other: Interest) -> Option<Interest> {
+ let value = self.0 & ! other.0;
+ if value != 0 { Some(Self(value)) } else { None }
+ }
+ 
+ fn to_mio(self) -> mio::Interest {
+ fn mio_add(wrapped: &mut Option<mio::Interest>, add: mio::Interest) {
+ match wrapped { Some(inner) => * inner |= add, None => * wrapped = Some(add) }
+ }
+ 
+ let mut mio = None;
+ if self.is_readable() { mio_add(&mut mio, mio::Interest::READABLE); }
+ if self.is_writable() { mio_add(&mut mio, mio::Interest::WRITABLE); }
+ #[cfg(any(target_os = "linux", target_os = "android"))] if self.is_priority() { mio_add(&mut mio, mio::Interest::PRIORITY); }
+ #[cfg(target_os = "freebsd")] if self.is_aio() { mio_add(&mut mio, mio::Interest::AIO); }
+ #[cfg(target_os = "freebsd")] if self.is_lio() { mio_add(&mut mio, mio::Interest::LIO); }
+ if self.is_error() { mio_add(&mut mio, mio::Interest::READABLE); }
+ mio.unwrap_or(mio::Interest::READABLE)
+ }
+ 
+ fn mask(self) -> Ready {
+ match self { Interest::READABLE => Ready::READABLE | Ready::READ_CLOSED, Interest::WRITABLE => Ready::WRITABLE | Ready::WRITE_CLOSED, #[cfg(any(target_os = "linux", target_os = "android"))] Interest::PRIORITY => Ready::PRIORITY | Ready::READ_CLOSED, Interest::ERROR => Ready::ERROR, _ => Ready::EMPTY }
+ }
+ 
+}
+
+impl ops::BitOr for Interest {
+ type Output = Self;
+ fn bitor(self, other: Self) -> Self {
+ self.add(other)
+ }
+ 
+}
+
+impl ops::BitOrAssign for Interest {
+ fn bitor_assign(&mut self, other: Self) {
+ *self = *self | other;
+ }
+ 
+}
+
+impl fmt::Debug for Interest {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ let mut separator = false;
+ if self.is_readable() { if separator { write!(fmt, " | ") ?; } write!(fmt, "READABLE") ?; separator = true; }
+ if self.is_writable() { if separator { write!(fmt, " | ") ?; } write!(fmt, "WRITABLE") ?; separator = true; }
+ #[cfg(any(target_os = "linux", target_os = "android"))] if self.is_priority() { if separator { write!(fmt, " | ") ?; } write!(fmt, "PRIORITY") ?; separator = true; }
+ #[cfg(target_os = "freebsd")] if self.is_aio() { if separator { write!(fmt, " | ") ?; } write!(fmt, "AIO") ?; separator = true; }
+ #[cfg(target_os = "freebsd")] if self.is_lio() { if separator { write!(fmt, " | ") ?; } write!(fmt, "LIO") ?; separator = true; }
+ if self.is_error() { if separator { write!(fmt, " | ") ?; } write!(fmt, "ERROR") ?; separator = true; }
+ let _ = separator;
+ Ok(())
+ }
+ 
+}
+

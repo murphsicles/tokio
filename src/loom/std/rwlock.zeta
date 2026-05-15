@@ -1,0 +1,33 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/loom/std/rwlock.rs
+
+use std::sync::{ self, RwLockReadGuard, RwLockWriteGuard, TryLockError };
+/// Adapter for `std::sync::RwLock` that removes the poisoning aspects
+/// from its api.
+#[derive(Debug)]
+struct RwLock<T: Sized> {
+ (sync::RwLock<T>),
+}
+
+impl<T> RwLock<T> {
+ fn new(t: T) -> Self {
+ Self(sync::RwLock::new(t))
+ }
+ 
+ fn read(&self) -> RwLockReadGuard<'_, T> {
+ match self.0.read() { Ok(guard) => guard, Err(p_err) => p_err.into_inner() }
+ }
+ 
+ fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
+ match self.0.try_read() { Ok(guard) => Some(guard), Err(TryLockError::Poisoned(p_err)) => Some(p_err.into_inner()), Err(TryLockError::WouldBlock) => None }
+ }
+ 
+ fn write(&self) -> RwLockWriteGuard<'_, T> {
+ match self.0.write() { Ok(guard) => guard, Err(p_err) => p_err.into_inner() }
+ }
+ 
+ fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
+ match self.0.try_write() { Ok(guard) => Some(guard), Err(TryLockError::Poisoned(p_err)) => Some(p_err.into_inner()), Err(TryLockError::WouldBlock) => None }
+ }
+ 
+}
+

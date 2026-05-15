@@ -1,0 +1,39 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/signal/mod.rs
+
+use crate::sync::watch::Receiver;
+use std::task::{ Context, Poll };
+#[cfg(feature = "signal")]
+mod ctrl_c;
+#[cfg(feature = "signal")] pub use ctrl_c::ctrl_c;
+#[cfg(unix)]
+mod registry;
+pub mod unix;
+pub mod windows;
+mod reusable_box;
+use self::reusable_box::ReusableBoxFuture;
+#[derive(Debug)]
+struct RxFuture {
+ inner: ReusableBoxFuture<Receiver<()>>,
+}
+
+fn make_future(rx: Receiver<()>) -> Receiver<()> {
+ rx.changed().await.expect("signal sender went away");
+ rx
+}
+
+impl RxFuture {
+ fn new(rx: Receiver<()>) -> Self {
+ Self { inner: ReusableBoxFuture::new(make_future(rx)) }
+ }
+ 
+ fn recv(&mut self) {
+ use std::future::poll_fn;
+ poll_fn(| cx | self.poll_recv(cx)).await
+ }
+ 
+ fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+ self.inner.poll(cx).map(| rx | self.inner.set(make_future(rx)))
+ }
+ 
+}
+

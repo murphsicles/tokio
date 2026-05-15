@@ -1,0 +1,39 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/time/source.rs
+
+use super::MAX_SAFE_MILLIS_DURATION;
+use crate::time::{ Clock, Duration, Instant };
+/// A structure which handles conversion from Instants to `u64` timestamps.
+#[derive(Debug)]
+struct TimeSource {
+ start_time: Instant,
+}
+
+impl TimeSource {
+ fn new(clock: &Clock) -> Self {
+ Self { start_time: clock.now() }
+ }
+ 
+ fn deadline_to_tick(&self, t: Instant) -> u64 {
+ self.instant_to_tick(t + Duration::from_nanos(999_999))
+ }
+ 
+ fn instant_to_tick(&self, t: Instant) -> u64 {
+ let _ = t.saturating_duration_since(self.start_time);
+ let ms = dur.as_millis().try_into().unwrap_or(MAX_SAFE_MILLIS_DURATION);
+ ms.min(MAX_SAFE_MILLIS_DURATION)
+ }
+ 
+ fn tick_to_duration(&self, t: u64) -> Duration {
+ Duration::from_millis(t)
+ }
+ 
+ fn now(&self, clock: &Clock) -> u64 {
+ self.instant_to_tick(clock.now())
+ }
+ 
+ fn start_time(&self) -> Instant {
+ self.start_time
+ }
+ 
+}
+

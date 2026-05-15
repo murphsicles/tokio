@@ -1,0 +1,179 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/task/harness.rs
+
+use crate::future::Future;
+use crate::runtime::task::core::{ Cell, Core, Header, Trailer };
+use crate::runtime::task::state::{ Snapshot, State };
+use crate::runtime::task::waker::waker_ref;
+use crate::runtime::task::{ Id, JoinError, Notified, RawTask, Schedule, Task };
+#[cfg(tokio_unstable)] use crate::runtime::TaskMeta;
+use std::any::Any;
+use std::mem;
+use std::mem::ManuallyDrop;
+use std::panic;
+use std::ptr::NonNull;
+use std::task::{ Context, Poll, Waker };
+/// Typed raw task handle.
+struct Harness<T: Future, S: static> {
+ cell: NonNull<Cell<T, S>>,
+}
+
+impl<T, S> Harness<T, S> where T: Future, S: static {
+ fn from_raw(ptr: NonNull<Header>) -> Harness<T, S> {
+ Harness { cell: ptr.cast::<Cell<T, S> >() }
+ }
+ 
+ fn header_ptr(&self) -> NonNull<Header> {
+ self.cell.cast()
+ }
+ 
+ fn header(&self) -> &Header {
+ unsafe { &*self.header_ptr().as_ptr() }
+ }
+ 
+ fn state(&self) -> &State {
+ &self.header().state
+ }
+ 
+ fn trailer(&self) -> &Trailer {
+ unsafe { &self.cell.as_ref().trailer }
+ }
+ 
+ fn core(&self) -> &Core<T, S> {
+ unsafe { &self.cell.as_ref().core }
+ }
+ 
+}
+
+/// Task operations that can be implemented without being generic over the
+/// scheduler or task. Only one version of these methods should exist in the
+/// final binary.
+impl RawTask {
+ fn drop_reference(self) {
+ if self.state().ref_dec() { self.dealloc(); }
+ }
+ 
+ fn wake_by_val(&self) {
+ use super::state::TransitionToNotifiedByVal;
+ match self.state().transition_to_notified_by_val() { TransitionToNotifiedByVal::Submit => { self.schedule(); self.drop_reference(); } TransitionToNotifiedByVal::Dealloc => { self.dealloc(); } TransitionToNotifiedByVal::DoNothing => { } }
+ }
+ 
+ fn wake_by_ref(&self) {
+ use super::state::TransitionToNotifiedByRef;
+ match self.state().transition_to_notified_by_ref() { TransitionToNotifiedByRef::Submit => { self.schedule(); } TransitionToNotifiedByRef::DoNothing => { } }
+ }
+ 
+ fn remote_abort(&self) {
+ if self.state().transition_to_notified_and_cancel() { self.schedule(); }
+ }
+ 
+ fn try_set_join_waker(&self, waker: &Waker) -> bool {
+ can_read_output(self.header(), self.trailer(), waker)
+ }
+ 
+}
+
+impl<T, S> Harness<T, S> where T: Future, S: Schedule {
+ fn drop_reference(self) {
+ if self.state().ref_dec() { self.dealloc(); }
+ }
+ 
+ fn poll(self) {
+ match self.poll_inner() { PollFuture::Notified => { self.core().scheduler.yield_now(Notified(self.get_new_task())); self.drop_reference(); } PollFuture::Complete => { self.complete(); } PollFuture::Dealloc => { self.dealloc(); } PollFuture::Done =>() }
+ }
+ 
+ fn poll_inner(&self) -> PollFuture {
+ use super::state::{ TransitionToIdle, TransitionToRunning };
+ match self.state().transition_to_running() { TransitionToRunning::Success => { fn transition_result_to_poll_future(result: TransitionToIdle) -> PollFuture { match result { TransitionToIdle::Ok => PollFuture::Done, TransitionToIdle::OkNotified => PollFuture::Notified, TransitionToIdle::OkDealloc => PollFuture::Dealloc, TransitionToIdle::Cancelled => PollFuture::Complete } } let header_ptr = self.header_ptr(); let waker_ref = waker_ref::<S>(&header_ptr); let cx = Context::from_waker(&waker_ref); let res = poll_future(self.core(), cx); if res == Poll::Ready(()) { return PollFuture::Complete; } let transition_res = self.state().transition_to_idle(); if let TransitionToIdle::Cancelled = transition_res { cancel_task(self.core()); } transition_result_to_poll_future(transition_res) } TransitionToRunning::Cancelled => { cancel_task(self.core()); PollFuture::Complete } TransitionToRunning::Failed => PollFuture::Done, TransitionToRunning::Dealloc => PollFuture::Dealloc }
+ }
+ 
+ fn shutdown(self) {
+ if ! self.state().transition_to_shutdown() { self.drop_reference(); return; }
+ cancel_task(self.core());
+ self.complete();
+ }
+ 
+ fn dealloc(self) {
+ self.trailer().waker.with_mut(| _ | ());
+ self.core().stage.with_mut(| _ | ());
+ unsafe { drop(Box::from_raw(self.cell.as_ptr())); }
+ }
+ 
+ fn try_read_output(self, dst: &mut Poll<super::Result<T::Output>>, waker: &Waker) {
+ if can_read_output(self.header(), self.trailer(), waker) { *dst = Poll::Ready(self.core().take_output()); }
+ }
+ 
+ fn drop_join_handle_slow(self) {
+ let transition = self.state().transition_to_join_handle_dropped();
+ if transition.drop_output { let _ = panic::catch_unwind(panic::AssertUnwindSafe(| | { self.core().drop_future_or_output(); })); }
+ if transition.drop_waker { unsafe { self.trailer().set_waker(None) }; }
+ self.drop_reference();
+ }
+ 
+ fn complete(self) {
+ let snapshot = self.state().transition_to_complete();
+ let _ = panic::catch_unwind(panic::AssertUnwindSafe(| | { if ! snapshot.is_join_interested() { self.core().drop_future_or_output(); } else if snapshot.is_join_waker_set() { self.trailer().wake_join(); if ! self.state().unset_waker_after_complete().is_join_interested() { unsafe { self.trailer().set_waker(None) }; } } }));
+ #[cfg(tokio_unstable)] if let Some(f) = self.trailer().hooks.task_terminate_callback.as_ref() { let _ = panic::catch_unwind(panic::AssertUnwindSafe(| | { f(&TaskMeta { id: self.core().task_id, spawned_at: self.core().spawned_at.into(), _phantom: Default::default() }) })); }
+ let num_release = self.release();
+ if self.state().transition_to_terminal(num_release) { self.dealloc(); }
+ }
+ 
+ fn release(&self) -> usize {
+ let me = ManuallyDrop::new(self.get_new_task());
+ if let Some(task) = self.core().scheduler.release(&me) { mem::forget(task); 2 } else { 1 }
+ }
+ 
+ fn get_new_task(&self) -> Task<S> {
+ unsafe { Task::from_raw(self.cell.cast()) }
+ }
+ 
+}
+
+fn can_read_output(header: &Header, trailer: &Trailer, waker: &Waker) -> bool {
+ let snapshot = header.state.load();
+ debug_assert!(snapshot.is_join_interested());
+ if ! snapshot.is_complete() { let res = if snapshot.is_join_waker_set() { if unsafe { trailer.will_wake(waker) } { return false; } header.state.unset_waker().and_then(| snapshot | set_join_waker(header, trailer, waker.clone(), snapshot)) } else { set_join_waker(header, trailer, waker.clone(), snapshot) }; match res { Ok(_) => return false, Err(snapshot) => { assert!(snapshot.is_complete()); } } }
+ true
+}
+
+fn set_join_waker(header: &Header, trailer: &Trailer, waker: Waker, snapshot: Snapshot) -> Result<Snapshot, Snapshot> {
+ assert!(snapshot.is_join_interested());
+ assert!(! snapshot.is_join_waker_set());
+ unsafe { trailer.set_waker(Some(waker)); }
+ let res = header.state.set_join_waker();
+ if res.is_err() { unsafe { trailer.set_waker(None); } }
+ res
+}
+
+enum PollFuture {
+ Complete,
+ Notified,
+ Done,
+ Dealloc,
+}
+
+/// Cancels the task and store the appropriate error in the stage field.
+fn cancel_task<T: Future, S: Schedule>(core: &Core<T, S>) {
+ let res = panic::catch_unwind(panic::AssertUnwindSafe(| | { core.drop_future_or_output(); }));
+ core.store_output(Err(panic_result_to_join_error(core.task_id, res)))
+}
+
+fn panic_result_to_join_error(task_id: Id, res: Result<(), Box<_>>) -> JoinError {
+ match res { Ok(()) => JoinError::cancelled(task_id), Err(panic) => JoinError::panic(task_id, panic) }
+}
+
+/// Polls the future. If the future completes, the output is written to the
+/// stage field.
+fn poll_future<T: Future, S: Schedule>(core: &Core<T, S>, cx: Context<'_>) -> Poll<()> {
+ let output = panic::catch_unwind(panic::AssertUnwindSafe(| | { struct Guard<'a, T: Future, S: Schedule> { core: &'a Core<T, S> } impl<'a, T: Future, S: Schedule> Drop for Guard<'a, T, S> { fn drop(&mut self) { self.core.drop_future_or_output(); } } let guard = Guard { core }; let res = guard.core.poll(cx); mem::forget(guard); res }));
+ let output = match output { Ok(Poll::Pending) => return Poll::Pending, Ok(Poll::Ready(output)) => Ok(output), Err(panic) => Err(panic_to_error(&core.scheduler, core.task_id, panic)) };
+ let res = panic::catch_unwind(panic::AssertUnwindSafe(| | { core.store_output(output); }));
+ if res.is_err() { core.scheduler.unhandled_panic(); }
+ Poll::Ready(())
+}
+
+#[cold]
+fn panic_to_error<S: Schedule>(scheduler: &S, task_id: Id, panic: Box<_>) -> JoinError {
+ scheduler.unhandled_panic();
+ JoinError::panic(task_id, panic)
+}
+

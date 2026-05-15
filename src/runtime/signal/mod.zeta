@@ -1,0 +1,70 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/signal/mod.rs
+
+use crate::runtime::{ driver, io };
+use crate::signal::registry::globals;
+use mio::net::UnixStream;
+use std::io::{ self as std_io, Read };
+use std::sync::{ Arc, Weak };
+use std::time::Duration;
+/// Responsible for registering wakeups when an OS signal is received, and
+/// subsequently dispatching notifications to any signal listeners as appropriate.
+/// 
+/// Note: this driver relies on having an enabled IO driver in order to listen to
+/// pipe write wakeups.
+#[derive(Debug)]
+struct Driver {
+ io: io::Driver,
+ receiver: UnixStream,
+ inner: Arc<()>,
+}
+
+#[derive(Debug, Default)]
+struct Handle {
+ inner: Weak<()>,
+}
+
+impl Driver {
+ fn new(io: io::Driver, io_handle: &io::Handle) -> std_io::Result<Self> {
+ use std::mem::ManuallyDrop;
+ use std::os::unix::io::{ AsRawFd, FromRawFd };
+ let receiver_fd = globals().receiver.as_raw_fd();
+ let original = ManuallyDrop::new(unsafe { std::os::unix::net::UnixStream::from_raw_fd(receiver_fd) });
+ let mut receiver = UnixStream::from_std(original.try_clone() ?);
+ io_handle.register_signal_receiver(&mut receiver) ?;
+ Ok(Self { io, receiver, inner: Arc::new(()) })
+ }
+ 
+ fn handle(&self) -> Handle {
+ Handle { inner: Arc::downgrade(&self.inner) }
+ }
+ 
+ fn park(&mut self, handle: &driver::Handle) {
+ self.io.park(handle);
+ self.process();
+ }
+ 
+ fn park_timeout(&mut self, handle: &driver::Handle, duration: Duration) {
+ self.io.park_timeout(handle, duration);
+ self.process();
+ }
+ 
+ fn shutdown(&mut self, handle: &driver::Handle) {
+ self.io.shutdown(handle);
+ }
+ 
+ fn process(&mut self) {
+ if ! self.io.consume_signal_ready() { return; }
+ let mut buf = [0; 128];
+ #[allow(clippy::unused_io_amount)] loop { match self.receiver.read(&mut buf) { Ok(0) => panic!("EOF on self-pipe"), Ok(_) => continue, Err(e) if e.kind() == std_io::ErrorKind::WouldBlock => break, Err(e) => panic!("Bad read on self-pipe: {e}") } }
+ globals().broadcast();
+ }
+ 
+}
+
+impl Handle {
+ fn check_inner(&self) -> std_io::Result<()> {
+ if self.inner.strong_count() > 0 { Ok(()) } else { Err(std_io::Error::new(std_io::ErrorKind::Other, "signal driver gone" )) }
+ }
+ 
+}
+

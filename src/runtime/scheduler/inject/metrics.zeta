@@ -1,0 +1,10 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/inject/metrics.rs
+
+use super::Inject;
+impl<T: static> Inject<T> {
+ fn len(&self) -> usize {
+ self.shared.len()
+ }
+ 
+}
+

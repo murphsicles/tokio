@@ -1,0 +1,5 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/loom/std/atomic_u64.rs
+
+cfg_has_atomic_u64 ! { #[path = "atomic_u64_native.rs"] mod imp; }
+cfg_not_has_atomic_u64 ! { #[path = "atomic_u64_as_mutex.rs"] mod imp; }
+pub(crate) use imp::AtomicU64;

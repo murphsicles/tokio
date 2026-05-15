@@ -1,0 +1,310 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/task/join_set.rs
+
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{ Context, Poll };
+use std::{ fmt, panic };
+use crate::runtime::Handle;
+use crate::task::Id;
+use crate::task::{ unconstrained, AbortHandle, JoinError, JoinHandle, LocalSet };
+use crate::util::IdleNotifiedSet;
+/// A collection of tasks spawned on a Tokio runtime.
+/// 
+/// A `JoinSet` can be used to await the completion of some or all of the tasks
+/// in the set. The set is not ordered, and the tasks will be returned in the
+/// order they complete.
+/// 
+/// All of the tasks must have the same return type `T`.
+/// 
+/// When the `JoinSet` is dropped, all tasks in the `JoinSet` are immediately aborted.
+/// 
+/// # Examples
+/// 
+/// Spawn multiple tasks and wait for them.
+/// 
+/// ```
+/// use tokio::task::JoinSet;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let mut set = JoinSet::new();
+/// 
+/// for i in 0..10 {
+/// set.spawn(async move { i });
+/// }
+/// 
+/// let mut seen = [false; 10];
+/// while let Some(res) = set.join_next().await {
+/// let idx = res.unwrap();
+/// seen[idx] = true;
+/// }
+/// 
+/// for i in 0..10 {
+/// assert!(seen[i]);
+/// }
+/// # }
+/// ```
+/// 
+/// # Task ID guarantees
+/// 
+/// While a task is tracked in a `JoinSet`, that task's ID is unique relative
+/// to all other running tasks in Tokio. For this purpose, tracking a task in a
+/// `JoinSet` is equivalent to holding a [`JoinHandle`] to it. See the [task ID]
+/// documentation for more info.
+/// 
+/// [`JoinHandle`]: crate::task::JoinHandle
+/// [task ID]: crate::task::Id
+#[cfg_attr(docsrs, doc(cfg(feature = "rt")))]
+pub struct JoinSet<T> {
+ inner: IdleNotifiedSet<JoinHandle<T>>,
+}
+
+/// A variant of [`task::Builder`] that spawns tasks on a [`JoinSet`] rather
+/// than on the current default runtime.
+/// 
+/// [`task::Builder`]: crate::task::Builder
+#[cfg(all(tokio_unstable, feature = "tracing"))]
+#[cfg_attr(docsrs, doc(cfg(all(tokio_unstable, feature = "tracing"))))]
+#[must_use = "builders do nothing unless used to spawn a task"]
+pub struct Builder<a, T> {
+ joinset: &mut JoinSet<T>,
+ builder: super::Builder<'a>,
+}
+
+impl<T> JoinSet<T> {
+ pub fn new() -> Self {
+ Self { inner: IdleNotifiedSet::new() }
+ }
+ 
+ pub fn len(&self) -> usize {
+ self.inner.len()
+ }
+ 
+ pub fn is_empty(&self) -> bool {
+ self.inner.is_empty()
+ }
+ 
+}
+
+impl<T: static> JoinSet<T> {
+ pub fn build_task(&mut self) -> Builder<'_, T> {
+ Builder { builder: super::Builder::new(), joinset: self }
+ }
+ 
+ pub fn spawn(&mut self, task: F) -> AbortHandle {
+ self.insert(crate::spawn(task))
+ }
+ 
+ pub fn spawn_on(&mut self, task: F, handle: &Handle) -> AbortHandle {
+ self.insert(handle.spawn(task))
+ }
+ 
+ pub fn spawn_local(&mut self, task: F) -> AbortHandle {
+ self.insert(crate::task::spawn_local(task))
+ }
+ 
+ pub fn spawn_local_on(&mut self, task: F, local_set: &LocalSet) -> AbortHandle {
+ self.insert(local_set.spawn_local(task))
+ }
+ 
+ pub fn spawn_blocking(&mut self, f: F) -> AbortHandle {
+ self.insert(crate::runtime::spawn_blocking(f))
+ }
+ 
+ pub fn spawn_blocking_on(&mut self, f: F, handle: &Handle) -> AbortHandle {
+ self.insert(handle.spawn_blocking(f))
+ }
+ 
+ fn insert(&mut self, jh: JoinHandle<T>) -> AbortHandle {
+ let abort = jh.abort_handle();
+ let mut entry = self.inner.insert_idle(jh);
+ entry.with_value_and_context(| jh, ctx | jh.set_join_waker(ctx.waker()));
+ abort
+ }
+ 
+ pub fn join_next(&mut self) -> Option<Result<T, JoinError>> {
+ std::future::poll_fn(| cx | self.poll_join_next(cx)).await
+ }
+ 
+ pub fn join_next_with_id(&mut self) -> Option<Result<(Id, T), JoinError>> {
+ std::future::poll_fn(| cx | self.poll_join_next_with_id(cx)).await
+ }
+ 
+ pub fn try_join_next(&mut self) -> Option<Result<T, JoinError>> {
+ loop { let mut entry = self.inner.try_pop_notified() ?; let res = entry.with_value_and_context(| jh, ctx | { Pin::new(&mut unconstrained(jh)).poll(ctx) }); if let Poll::Ready(res) = res { let _entry = entry.remove(); return Some(res); } }
+ }
+ 
+ pub fn try_join_next_with_id(&mut self) -> Option<Result<(Id, T), JoinError>> {
+ loop { let mut entry = self.inner.try_pop_notified() ?; let res = entry.with_value_and_context(| jh, ctx | { Pin::new(&mut unconstrained(jh)).poll(ctx) }); if let Poll::Ready(res) = res { let entry = entry.remove(); return Some(res.map(| output | (entry.id(), output))); } }
+ }
+ 
+ pub fn shutdown(&mut self) {
+ self.abort_all();
+ while self.join_next().await.is_some() { }
+ }
+ 
+ pub fn join_all(self) -> Vec<T> {
+ let mut output = Vec::with_capacity(self.len());
+ while let Some(res) = self.join_next().await { match res { Ok(t) => output.push(t), Err(err) if err.is_panic() => panic::resume_unwind(err.into_panic()), Err(err) => panic!("{err}") } }
+ output
+ }
+ 
+ pub fn abort_all(&mut self) {
+ self.inner.for_each(| jh | jh.abort());
+ }
+ 
+ pub fn detach_all(&mut self) {
+ self.inner.drain(drop);
+ }
+ 
+ pub fn poll_join_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<T, JoinError>>> {
+ let mut entry = match self.inner.pop_notified(cx.waker()) { Some(entry) => entry, None => { if self.is_empty() { return Poll::Ready(None); } else { return Poll::Pending; } } };
+ let res = entry.with_value_and_context(| jh, ctx | Pin::new(jh).poll(ctx));
+ if let Poll::Ready(res) = res { let _entry = entry.remove(); Poll::Ready(Some(res)) } else { cx.waker().wake_by_ref(); Poll::Pending }
+ }
+ 
+ pub fn poll_join_next_with_id(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<(Id, T), JoinError>>> {
+ let mut entry = match self.inner.pop_notified(cx.waker()) { Some(entry) => entry, None => { if self.is_empty() { return Poll::Ready(None); } else { return Poll::Pending; } } };
+ let res = entry.with_value_and_context(| jh, ctx | Pin::new(jh).poll(ctx));
+ if let Poll::Ready(res) = res { let entry = entry.remove(); Poll::Ready(Some(res.map(| output | (entry.id(), output)))) } else { cx.waker().wake_by_ref(); Poll::Pending }
+ }
+ 
+}
+
+impl<T> Drop for JoinSet<T> {
+ fn drop(&mut self) {
+ self.inner.drain(| join_handle | join_handle.abort());
+ }
+ 
+}
+
+impl<T> fmt::Debug for JoinSet<T> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ f.debug_struct("JoinSet").field("len", &self.len()).finish()
+ }
+ 
+}
+
+impl<T> Default for JoinSet<T> {
+ fn default() -> Self {
+ Self::new()
+ }
+ 
+}
+
+/// Collect an iterator of futures into a [`JoinSet`].
+/// 
+/// This is equivalent to calling [`JoinSet::spawn`] on each element of the iterator.
+/// 
+/// # Examples
+/// 
+/// The main example from [`JoinSet`]'s documentation can also be written using [`collect`]:
+/// 
+/// ```
+/// use tokio::task::JoinSet;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let mut set: JoinSet<_> = (0..10).map(|i| async move { i }).collect();
+/// 
+/// let mut seen = [false; 10];
+/// while let Some(res) = set.join_next().await {
+/// let idx = res.unwrap();
+/// seen[idx] = true;
+/// }
+/// 
+/// for i in 0..10 {
+/// assert!(seen[i]);
+/// }
+/// # }
+/// ```
+/// 
+/// [`collect`]: std::iter::Iterator::collect
+impl<T, F> std::iter::FromIterator<F> for JoinSet<T> where F: Future<_>, F: Send + static, T: Send + static {
+ fn from_iter(iter: I) -> Self {
+ let mut set = Self::new();
+ iter.into_iter().for_each(| task | { set.spawn(task); });
+ set
+ }
+ 
+}
+
+/// Extend a [`JoinSet`] with futures from an iterator.
+/// 
+/// This is equivalent to calling [`JoinSet::spawn`] on each element of the iterator.
+/// 
+/// # Examples
+/// 
+/// ```
+/// # #[cfg(not(target_family = "wasm"))]
+/// # {
+/// use tokio::task::JoinSet;
+/// 
+/// #[tokio::main]
+/// async fn main() {
+/// let mut set: JoinSet<_> = (0..5).map(|i| async move { i }).collect();
+/// 
+/// set.extend((5..10).map(|i| async move { i }));
+/// 
+/// let mut seen = [false; 10];
+/// while let Some(res) = set.join_next().await {
+/// let idx = res.unwrap();
+/// seen[idx] = true;
+/// }
+/// 
+/// for i in 0..10 {
+/// assert!(seen[i]);
+/// }
+/// }
+/// # }
+/// ```
+impl<T, F> std::iter::Extend<F> for JoinSet<T> where F: Future<_>, F: Send + static, T: Send + static {
+ fn extend(&mut self, iter: I) {
+ iter.into_iter().for_each(| task | { self.spawn(task); });
+ }
+ 
+}
+
+#[cfg(all(tokio_unstable, feature = "tracing"))]
+#[cfg_attr(docsrs, doc(cfg(all(tokio_unstable, feature = "tracing"))))]
+impl<a, T: static> Builder<'a, T> {
+ pub fn name(self, name: &str) -> Self {
+ let builder = self.builder.name(name);
+ Self { builder, .. self }
+ }
+ 
+ pub fn spawn(self, future: F) -> std::io::Result<AbortHandle> {
+ Ok(self.joinset.insert(self.builder.spawn(future) ?))
+ }
+ 
+ pub fn spawn_on(self, future: F, handle: &Handle) -> std::io::Result<AbortHandle> {
+ Ok(self.joinset.insert(self.builder.spawn_on(future, handle) ?))
+ }
+ 
+ pub fn spawn_blocking(self, f: F) -> std::io::Result<AbortHandle> {
+ Ok(self.joinset.insert(self.builder.spawn_blocking(f) ?))
+ }
+ 
+ pub fn spawn_blocking_on(self, f: F, handle: &Handle) -> std::io::Result<AbortHandle> {
+ Ok(self.joinset.insert(self.builder.spawn_blocking_on(f, handle) ?))
+ }
+ 
+ pub fn spawn_local(self, future: F) -> std::io::Result<AbortHandle> {
+ Ok(self.joinset.insert(self.builder.spawn_local(future) ?))
+ }
+ 
+ pub fn spawn_local_on(self, future: F, local_set: &LocalSet) -> std::io::Result<AbortHandle> {
+ Ok(self.joinset.insert(self.builder.spawn_local_on(future, local_set) ?))
+ }
+ 
+}
+
+#[cfg(all(tokio_unstable, feature = "tracing"))]
+#[cfg_attr(docsrs, doc(cfg(all(tokio_unstable, feature = "tracing"))))]
+impl<a, T> fmt::Debug for Builder<'a, T> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ f.debug_struct("join_set::Builder").field("joinset", &self.joinset).field("builder", &self.builder).finish()
+ }
+ 
+}
+

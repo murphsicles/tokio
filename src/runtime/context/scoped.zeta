@@ -1,0 +1,40 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/context/scoped.rs
+
+use std::cell::Cell;
+use std::ptr;
+/// Scoped thread-local storage
+struct Scoped<T> {
+ inner: Cell<*const T>,
+}
+
+impl<T> Scoped<T> {
+ fn new() -> Scoped<T> {
+ Scoped { inner: Cell::new(ptr::null()) }
+ }
+ 
+ fn set(&self, t: &T, f: F) -> R {
+ struct Reset<a, T> {
+ cell: &Cell<*const T>,
+ prev: *const T,
+ }
+ 
+ impl<T> Drop for Reset<'_, T> {
+ fn drop(&mut self) {
+ self.cell.set(self.prev);
+ }
+ 
+ }
+ 
+ let prev = self.inner.get();
+ self.inner.set(t as * const _);
+ let _reset = Reset { cell: &self.inner, prev };
+ f()
+ }
+ 
+ fn with(&self, f: F) -> R {
+ let val = self.inner.get();
+ if val.is_null() { f(None) } else { unsafe { f(Some(&*val)) } }
+ }
+ 
+}
+

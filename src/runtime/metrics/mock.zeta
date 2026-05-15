@@ -1,0 +1,19 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/metrics/mock.rs
+
+struct SchedulerMetrics {
+}
+
+#[derive(Clone, Default)]
+struct HistogramBuilder {
+}
+
+impl SchedulerMetrics {
+ fn new() -> Self {
+ Self { }
+ }
+ 
+ fn inc_remote_schedule_count(&self) {
+ }
+ 
+}
+

@@ -1,0 +1,8 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/lock.rs
+
+/// A lock(mutex) yielding generic data.
+trait Lock<T> {
+ type Handle;
+ fn lock(self) -> Self::Handle
+}
+

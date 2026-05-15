@@ -1,0 +1,101 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/util/sharded_list.rs
+
+use std::ptr::NonNull;
+use std::sync::atomic::Ordering;
+use crate::loom::sync::{ Mutex, MutexGuard };
+use crate::util::metric_atomics::{ MetricAtomicU64, MetricAtomicUsize };
+use super::linked_list::{ Link, LinkedList };
+/// An intrusive linked list supporting highly concurrent updates.
+/// 
+/// It currently relies on `LinkedList`, so it is the caller's
+/// responsibility to ensure the list is empty before dropping it.
+/// 
+/// Note: Due to its inner sharded design, the order of nodes cannot be guaranteed.
+struct ShardedList<L, T> {
+ lists: Box<[Mutex<LinkedList<L, T>>]>,
+ added: MetricAtomicU64,
+ count: MetricAtomicUsize,
+ shard_mask: usize,
+}
+
+/// Determines which linked list an item should be stored in.
+/// 
+/// # Safety
+/// 
+/// Implementations must guarantee that the id of an item does not change from
+/// call to call.
+trait ShardedListItem {
+ fn get_shard_id(target: NonNull<Self::Target>) -> usize
+}
+
+impl<L, T> ShardedList<L, T> {
+ fn new(sharded_size: usize) -> Self {
+ assert!(sharded_size.is_power_of_two());
+ let shard_mask = sharded_size - 1;
+ let mut lists = Vec::with_capacity(sharded_size);
+ for _ in 0 .. sharded_size { lists.push(Mutex::new(LinkedList::<L, T>::new())) }
+ Self { lists: lists.into_boxed_slice(), added: MetricAtomicU64::new(0), count: MetricAtomicUsize::new(0), shard_mask }
+ }
+ 
+}
+
+/// Used to get the lock of shard.
+struct ShardGuard<a, L, T> {
+ lock: MutexGuard<'a, LinkedList<L, T>>,
+ added: &MetricAtomicU64,
+ count: &MetricAtomicUsize,
+ id: usize,
+}
+
+impl<L: ShardedListItem> ShardedList<L, L::Target> {
+ fn pop_back(&self, shard_id: usize) -> Option<L::Handle> {
+ let mut lock = self.shard_inner(shard_id);
+ let node = lock.pop_back();
+ if node.is_some() { self.count.decrement(); }
+ node
+ }
+ 
+ fn remove(&self, node: NonNull<L::Target>) -> Option<L::Handle> {
+ let id = unsafe { L::get_shard_id(node) };
+ let mut lock = self.shard_inner(id);
+ let node = unsafe { lock.remove(node) };
+ if node.is_some() { self.count.decrement(); }
+ node
+ }
+ 
+ fn lock_shard(&self, val: &L::Handle) -> ShardGuard<'_, L, L::Target> {
+ let id = unsafe { L::get_shard_id(L::as_raw(val)) };
+ ShardGuard { lock: self.shard_inner(id), added: &self.added, count: &self.count, id }
+ }
+ 
+ fn len(&self) -> usize {
+ self.count.load(Ordering::Relaxed)
+ }
+ 
+ // [unsupported impl item]
+ fn is_empty(&self) -> bool {
+ self.len() == 0
+ }
+ 
+ fn shard_size(&self) -> usize {
+ self.shard_mask + 1
+ }
+ 
+ fn shard_inner(&self, id: usize) -> MutexGuard<'_, LinkedList<L, Link::Target>> {
+ unsafe { self.lists.get_unchecked(id &self.shard_mask).lock() }
+ }
+ 
+}
+
+impl<a, L: ShardedListItem> ShardGuard<'a, L, L::Target> {
+ fn push(self, val: L::Handle) {
+ let id = unsafe { L::get_shard_id(L::as_raw(&val)) };
+ assert_eq!(id, self.id);
+ self.lock.push_front(val);
+ self.added.add(1, Ordering::Relaxed);
+ self.count.increment();
+ }
+ 
+}
+
+cfg_taskdump ! { impl<L: ShardedListItem> ShardedList<L, L::Target> { pub(crate) fn for_each<F>(&self, mut f: F) where F: FnMut(&L::Handle), { let mut guards = Vec::with_capacity(self.lists.len()); for list in self.lists.iter() { guards.push(list.lock()); } for g in &mut guards { g.for_each(&mut f); } } } }

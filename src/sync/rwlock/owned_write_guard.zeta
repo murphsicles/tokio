@@ -1,0 +1,129 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/sync/rwlock/owned_write_guard.rs
+
+use crate::sync::rwlock::owned_read_guard::OwnedRwLockReadGuard;
+use crate::sync::rwlock::owned_write_guard_mapped::OwnedRwLockMappedWriteGuard;
+use crate::sync::rwlock::RwLock;
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::{ fmt, mem, ops, ptr };
+/// Owned RAII structure used to release the exclusive write access of a lock when
+/// dropped.
+/// 
+/// This structure is created by the [`write_owned`] method
+/// on [`RwLock`].
+/// 
+/// [`write_owned`]: method@crate::sync::RwLock::write_owned
+/// [`RwLock`]: struct@crate::sync::RwLock
+#[clippy::has_significant_drop]
+pub struct OwnedRwLockWriteGuard<T: Sized> {
+ resource_span: tracing::Span,
+ permits_acquired: u32,
+ lock: Arc<RwLock<T>>,
+ data: *mut T,
+ _p: PhantomData<T>,
+}
+
+struct Inner<T: Sized> {
+ resource_span: tracing::Span,
+ permits_acquired: u32,
+ lock: Arc<RwLock<T>>,
+ data: *const T,
+}
+
+impl<T: Sized> OwnedRwLockWriteGuard<T> {
+ fn skip_drop(self) -> Inner<T> {
+ let me = mem::ManuallyDrop::new(self);
+ unsafe { Inner { #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: ptr::read(&me.resource_span), permits_acquired: me.permits_acquired, lock: ptr::read(&me.lock), data: me.data } }
+ }
+ 
+ pub fn map(this: Self, f: F) -> OwnedRwLockMappedWriteGuard<T, U> {
+ let data = f(&mut * this) as * mut U;
+ let this = this.skip_drop();
+ OwnedRwLockMappedWriteGuard { permits_acquired: this.permits_acquired, lock: this.lock, data, _p: PhantomData, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: this.resource_span }
+ }
+ 
+ pub fn downgrade_map(this: Self, f: F) -> OwnedRwLockReadGuard<T, U> {
+ let data = f(&*this) as * const U;
+ let this = this.skip_drop();
+ let guard = OwnedRwLockReadGuard { lock: this.lock, data, _p: PhantomData, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: this.resource_span };
+ let to_release = (this.permits_acquired - 1) as usize;
+ guard.lock.s.release(to_release);
+ #[cfg(all(tokio_unstable, feature = "tracing"))] guard.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", write_locked = false, write_locked.op = "override" ) });
+ #[cfg(all(tokio_unstable, feature = "tracing"))] guard.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", current_readers = 1, current_readers.op = "add" ) });
+ guard
+ }
+ 
+ pub fn try_map(this: Self, f: F) -> Result<OwnedRwLockMappedWriteGuard<T, U>, Self> {
+ let data = match f(&mut * this) { Some(data) => data as * mut U, None => return Err(this) };
+ let this = this.skip_drop();
+ Ok(OwnedRwLockMappedWriteGuard { permits_acquired: this.permits_acquired, lock: this.lock, data, _p: PhantomData, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: this.resource_span })
+ }
+ 
+ pub fn try_downgrade_map(this: Self, f: F) -> Result<OwnedRwLockReadGuard<T, U>, Self> {
+ let data = match f(&*this) { Some(data) => data as * const U, None => return Err(this) };
+ let this = this.skip_drop();
+ let guard = OwnedRwLockReadGuard { lock: this.lock, data, _p: PhantomData, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: this.resource_span };
+ let to_release = (this.permits_acquired - 1) as usize;
+ guard.lock.s.release(to_release);
+ #[cfg(all(tokio_unstable, feature = "tracing"))] guard.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", write_locked = false, write_locked.op = "override" ) });
+ #[cfg(all(tokio_unstable, feature = "tracing"))] guard.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", current_readers = 1, current_readers.op = "add" ) });
+ Ok(guard)
+ }
+ 
+ pub fn into_mapped(this: Self) -> OwnedRwLockMappedWriteGuard<T> {
+ Self::map(this, | me | me)
+ }
+ 
+ pub fn downgrade(self) -> OwnedRwLockReadGuard<T> {
+ let this = self.skip_drop();
+ let guard = OwnedRwLockReadGuard { lock: this.lock, data: this.data, _p: PhantomData, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: this.resource_span };
+ let to_release = (this.permits_acquired - 1) as usize;
+ guard.lock.s.release(to_release);
+ #[cfg(all(tokio_unstable, feature = "tracing"))] guard.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", write_locked = false, write_locked.op = "override" ) });
+ #[cfg(all(tokio_unstable, feature = "tracing"))] guard.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", current_readers = 1, current_readers.op = "add" ) });
+ guard
+ }
+ 
+ pub fn rwlock(this: &Self) -> &Arc<RwLock<T>> {
+ &this.lock
+ }
+ 
+}
+
+impl<T: Sized> ops::Deref for OwnedRwLockWriteGuard<T> {
+ type Target = T;
+ fn deref(&self) -> &T {
+ unsafe { &*self.data }
+ }
+ 
+}
+
+impl<T: Sized> ops::DerefMut for OwnedRwLockWriteGuard<T> {
+ fn deref_mut(&mut self) -> &mut T {
+ unsafe { &mut * self.data }
+ }
+ 
+}
+
+impl<T: Sized> fmt::Debug for OwnedRwLockWriteGuard<T> where T: fmt::Debug {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ fmt::Debug::fmt(&* *self, f)
+ }
+ 
+}
+
+impl<T: Sized> fmt::Display for OwnedRwLockWriteGuard<T> where T: fmt::Display {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ fmt::Display::fmt(&* *self, f)
+ }
+ 
+}
+
+impl<T: Sized> Drop for OwnedRwLockWriteGuard<T> {
+ fn drop(&mut self) {
+ self.lock.s.release(self.permits_acquired as usize);
+ #[cfg(all(tokio_unstable, feature = "tracing"))] self.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", write_locked = false, write_locked.op = "override" ) });
+ }
+ 
+}
+

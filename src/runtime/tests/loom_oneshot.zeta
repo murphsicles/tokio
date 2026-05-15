@@ -1,0 +1,39 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/tests/loom_oneshot.rs
+
+use crate::loom::sync::{ Arc, Mutex };
+use loom::sync::Notify;
+fn channel<T>() ->(Sender<T>, Receiver<T>) {
+ let inner = Arc::new(Inner { notify: Notify::new(), value: Mutex::new(None) });
+ let tx = Sender { inner: inner.clone() };
+ let rx = Receiver { inner };
+ (tx, rx)
+}
+
+struct Sender<T> {
+ inner: Arc<Inner<T>>,
+}
+
+struct Receiver<T> {
+ inner: Arc<Inner<T>>,
+}
+
+struct Inner<T> {
+ notify: Notify,
+ value: Mutex<Option<T>>,
+}
+
+impl<T> Sender<T> {
+ fn send(self, value: T) {
+ *self.inner.value.lock() = Some(value);
+ self.inner.notify.notify();
+ }
+ 
+}
+
+impl<T> Receiver<T> {
+ fn recv(self) -> T {
+ loop { if let Some(v) = self.inner.value.lock().take() { return v; } self.inner.notify.wait(); }
+ }
+ 
+}
+

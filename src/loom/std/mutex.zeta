@@ -1,0 +1,29 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/loom/std/mutex.rs
+
+use std::sync::{ self, MutexGuard, TryLockError };
+/// Adapter for `std::Mutex` that removes the poisoning aspects
+/// from its API.
+#[derive(Debug)]
+struct Mutex<T: Sized> {
+ (sync::Mutex<T>),
+}
+
+impl<T> Mutex<T> {
+ fn new(t: T) -> Mutex<T> {
+ Mutex(sync::Mutex::new(t))
+ }
+ 
+ fn const_new(t: T) -> Mutex<T> {
+ Mutex(sync::Mutex::new(t))
+ }
+ 
+ fn lock(&self) -> MutexGuard<'_, T> {
+ match self.0.lock() { Ok(guard) => guard, Err(p_err) => p_err.into_inner() }
+ }
+ 
+ fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+ match self.0.try_lock() { Ok(guard) => Some(guard), Err(TryLockError::Poisoned(p_err)) => Some(p_err.into_inner()), Err(TryLockError::WouldBlock) => None }
+ }
+ 
+}
+

@@ -1,0 +1,92 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/io/registration.rs
+
+use crate::io::interest::Interest;
+use crate::runtime::io::{ Direction, Handle, ReadyEvent, ScheduledIo };
+use crate::runtime::scheduler;
+use mio::event::Source;
+use std::io;
+use std::sync::Arc;
+use std::task::{ ready, Context, Poll };
+cfg_io_driver ! { #[doc = " Associates an I/O resource with the reactor instance that drives it."] #[doc = ""] #[doc = " A registration represents an I/O resource registered with a Reactor such"] #[doc = " that it will receive task notifications on readiness. This is the lowest"] #[doc = " level API for integrating with a reactor."] #[doc = ""] #[doc = " The association between an I/O resource is made by calling"] #[doc = " [`new_with_interest_and_handle`]."] #[doc = " Once the association is established, it remains established until the"] #[doc = " registration instance is dropped."] #[doc = ""] #[doc = " A registration instance represents two separate readiness streams. One"] #[doc = " for the read readiness and one for write readiness. These streams are"] #[doc = " independent and can be consumed from separate tasks."] #[doc = ""] #[doc = " **Note**: while `Registration` is `Sync`, the caller must ensure that"] #[doc = " there are at most two tasks that use a registration instance"] #[doc = " concurrently. One task for [`poll_read_ready`] and one task for"] #[doc = " [`poll_write_ready`]. While violating this requirement is \"safe\" from a"] #[doc = " Rust memory safety point of view, it will result in unexpected behavior"] #[doc = " in the form of lost notifications and tasks hanging."] #[doc = ""] #[doc = " ## Platform-specific events"] #[doc = ""] #[doc = " `Registration` also allows receiving platform-specific `mio::Ready`"] #[doc = " events. These events are included as part of the read readiness event"] #[doc = " stream. The write readiness event stream is only for `Ready::writable()`"] #[doc = " events."] #[doc = ""] #[doc = " [`new_with_interest_and_handle`]: method@Self::new_with_interest_and_handle"] #[doc = " [`poll_read_ready`]: method@Self::poll_read_ready`"] #[doc = " [`poll_write_ready`]: method@Self::poll_write_ready`"] #[derive(Debug)] pub(crate) struct Registration { #[doc = " Handle to the associated runtime."] #[doc = ""] #[doc = " TODO: this can probably be moved into `ScheduledIo`."] handle: scheduler::Handle, #[doc = " Reference to state stored by the driver."] shared: Arc<ScheduledIo> } }
+unsafe impl Send for Registration {
+}
+
+unsafe impl Sync for Registration {
+}
+
+impl Registration {
+ fn new_with_interest_and_handle(io: &mut impl Source, interest: Interest, handle: scheduler::Handle) -> io::Result<Registration> {
+ let shared = handle.driver().io().add_source(io, interest) ?;
+ Ok(Registration { handle, shared })
+ }
+ 
+ fn deregister(&mut self, io: &mut impl Source) -> io::Result<()> {
+ self.handle().deregister_source(&self.shared, io)
+ }
+ 
+ fn clear_readiness(&self, event: ReadyEvent) {
+ self.shared.clear_readiness(event);
+ }
+ 
+ fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<ReadyEvent>> {
+ self.poll_ready(cx, Direction::Read)
+ }
+ 
+ fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<ReadyEvent>> {
+ self.poll_ready(cx, Direction::Write)
+ }
+ 
+ fn poll_read_io(&self, cx: &mut Context<'_>, f: impl FnMut) -> Poll<io::Result<R>> {
+ self.poll_io(cx, Direction::Read, f)
+ }
+ 
+ fn poll_write_io(&self, cx: &mut Context<'_>, f: impl FnMut) -> Poll<io::Result<R>> {
+ self.poll_io(cx, Direction::Write, f)
+ }
+ 
+ fn poll_ready(&self, cx: &mut Context<'_>, direction: Direction) -> Poll<io::Result<ReadyEvent>> {
+ ready!(crate::trace::trace_leaf(cx));
+ let coop = ready!(crate::task::coop::poll_proceed(cx));
+ let ev = ready!(self.shared.poll_readiness(cx, direction));
+ if ev.is_shutdown { return Poll::Ready(Err(gone())); }
+ coop.made_progress();
+ Poll::Ready(Ok(ev))
+ }
+ 
+ fn poll_io(&self, cx: &mut Context<'_>, direction: Direction, f: impl FnMut) -> Poll<io::Result<R>> {
+ loop { let ev = ready!(self.poll_ready(cx, direction)) ?; match f() { Ok(ret) => { return Poll::Ready(Ok(ret)); } Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => { self.clear_readiness(ev); } Err(e) => return Poll::Ready(Err(e)) } }
+ }
+ 
+ fn try_io(&self, interest: Interest, f: impl FnOnce) -> io::Result<R> {
+ let ev = self.shared.ready_event(interest);
+ if ev.ready.is_empty() { return Err(io::ErrorKind::WouldBlock.into()); }
+ match f() { Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => { self.clear_readiness(ev); Err(io::ErrorKind::WouldBlock.into()) } res => res }
+ }
+ 
+ fn readiness(&self, interest: Interest) -> io::Result<ReadyEvent> {
+ let ev = self.shared.readiness(interest).await;
+ if ev.is_shutdown { return Err(gone()); }
+ Ok(ev)
+ }
+ 
+ fn async_io(&self, interest: Interest, f: impl FnMut) -> io::Result<R> {
+ loop { let event = self.readiness(interest).await ?; let coop = std::future::poll_fn(crate::task::coop::poll_proceed).await; match f() { Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => { self.clear_readiness(event); } x => { coop.made_progress(); return x; } } }
+ }
+ 
+ fn handle(&self) -> &Handle {
+ self.handle.driver().io()
+ }
+ 
+}
+
+impl Drop for Registration {
+ fn drop(&mut self) {
+ self.shared.clear_wakers();
+ }
+ 
+}
+
+fn gone() -> io::Error {
+ io::Error::new(io::ErrorKind::Other, crate::util::error::RUNTIME_SHUTTING_DOWN_ERROR )
+}
+

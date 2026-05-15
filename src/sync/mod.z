@@ -1,7 +1,0 @@
-// tokio/src/sync/mod.z
-pub mod mutex;
-pub mod rwlock;
-pub mod barrier;
-pub mod semaphore;
-pub mod notify;
-pub mod watch;

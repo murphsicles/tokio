@@ -1,0 +1,11 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/multi_thread/worker/metrics.rs
+
+use super::Shared;
+impl Shared {
+ fn injection_queue_depth(&self) -> usize {
+ self.inject.len()
+ }
+ 
+}
+
+cfg_unstable_metrics ! { impl Shared { pub(crate) fn worker_local_queue_depth(&self, worker: usize) -> usize { self.remotes [worker] . steal.len() } } }

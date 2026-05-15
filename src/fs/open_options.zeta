@@ -1,0 +1,156 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/fs/open_options.rs
+
+use crate::fs::{ asyncify, File };
+use std::io;
+use std::path::Path;
+cfg_io_uring ! { mod uring_open_options; pub(crate) use uring_open_options::UringOpenOptions; use crate::runtime::driver::op::Op; }
+#[cfg(test)]
+mod mock_open_options;
+#[cfg(test)] use mock_open_options::MockOpenOptions as StdOpenOptions;
+#[cfg(not(test))] use std::fs::OpenOptions as StdOpenOptions;
+#[cfg(unix)] use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)] use std::os::windows::fs::OpenOptionsExt;
+/// Options and flags which can be used to configure how a file is opened.
+/// 
+/// This builder exposes the ability to configure how a [`File`] is opened and
+/// what operations are permitted on the open file. The [`File::open`] and
+/// [`File::create`] methods are aliases for commonly used options using this
+/// builder.
+/// 
+/// Generally speaking, when using `OpenOptions`, you'll first call [`new`],
+/// then chain calls to methods to set each option, then call [`open`], passing
+/// the path of the file you're trying to open. This will give you a
+/// [`io::Result`] with a [`File`] inside that you can further operate
+/// on.
+/// 
+/// This is a specialized version of [`std::fs::OpenOptions`] for usage from
+/// the Tokio runtime.
+/// 
+/// `From<std::fs::OpenOptions>` is implemented for more advanced configuration
+/// than the methods provided here.
+/// 
+/// [`new`]: OpenOptions::new
+/// [`open`]: OpenOptions::open
+/// [`File`]: File
+/// [`File::open`]: File::open
+/// [`File::create`]: File::create
+/// 
+/// # Examples
+/// 
+/// Opening a file to read:
+/// 
+/// ```no_run
+/// use tokio::fs::OpenOptions;
+/// use std::io;
+/// 
+/// #[tokio::main]
+/// async fn main() -> io::Result<()> {
+/// let file = OpenOptions::new()
+/// .read(true)
+/// .open("foo.txt")
+/// .await?;
+/// 
+/// Ok(())
+/// }
+/// ```
+/// 
+/// Opening a file for both reading and writing, as well as creating it if it
+/// doesn't exist:
+/// 
+/// ```no_run
+/// use tokio::fs::OpenOptions;
+/// use std::io;
+/// 
+/// #[tokio::main]
+/// async fn main() -> io::Result<()> {
+/// let file = OpenOptions::new()
+/// .read(true)
+/// .write(true)
+/// .create(true)
+/// .open("foo.txt")
+/// .await?;
+/// 
+/// Ok(())
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct OpenOptions {
+ inner: Kind,
+}
+
+#[derive(Debug, Clone)]
+enum Kind {
+ Std(StdOpenOptions),
+ Uring(UringOpenOptions),
+}
+
+impl OpenOptions {
+ pub fn new() -> OpenOptions {
+ let inner = Kind::Uring(UringOpenOptions::new());
+ let inner = Kind::Std(StdOpenOptions::new());
+ OpenOptions { inner }
+ }
+ 
+ pub fn read(&mut self, read: bool) -> &mut OpenOptions {
+ match &mut self.inner { Kind::Std(opts) => { opts.read(read); } #[cfg(all(tokio_unstable, feature = "io-uring", feature = "rt", feature = "fs", target_os = "linux"))] Kind::Uring(opts) => { opts.read(read); } }
+ self
+ }
+ 
+ pub fn write(&mut self, write: bool) -> &mut OpenOptions {
+ match &mut self.inner { Kind::Std(opts) => { opts.write(write); } #[cfg(all(tokio_unstable, feature = "io-uring", feature = "rt", feature = "fs", target_os = "linux"))] Kind::Uring(opts) => { opts.write(write); } }
+ self
+ }
+ 
+ pub fn append(&mut self, append: bool) -> &mut OpenOptions {
+ match &mut self.inner { Kind::Std(opts) => { opts.append(append); } #[cfg(all(tokio_unstable, feature = "io-uring", feature = "rt", feature = "fs", target_os = "linux"))] Kind::Uring(opts) => { opts.append(append); } }
+ self
+ }
+ 
+ pub fn truncate(&mut self, truncate: bool) -> &mut OpenOptions {
+ match &mut self.inner { Kind::Std(opts) => { opts.truncate(truncate); } #[cfg(all(tokio_unstable, feature = "io-uring", feature = "rt", feature = "fs", target_os = "linux"))] Kind::Uring(opts) => { opts.truncate(truncate); } }
+ self
+ }
+ 
+ pub fn create(&mut self, create: bool) -> &mut OpenOptions {
+ match &mut self.inner { Kind::Std(opts) => { opts.create(create); } #[cfg(all(tokio_unstable, feature = "io-uring", feature = "rt", feature = "fs", target_os = "linux"))] Kind::Uring(opts) => { opts.create(create); } }
+ self
+ }
+ 
+ pub fn create_new(&mut self, create_new: bool) -> &mut OpenOptions {
+ match &mut self.inner { Kind::Std(opts) => { opts.create_new(create_new); } #[cfg(all(tokio_unstable, feature = "io-uring", feature = "rt", feature = "fs", target_os = "linux"))] Kind::Uring(opts) => { opts.create_new(create_new); } }
+ self
+ }
+ 
+ pub fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
+ match &self.inner { Kind::Std(opts) => Self::std_open(opts, path).await, #[cfg(all(tokio_unstable, feature = "io-uring", feature = "rt", feature = "fs", target_os = "linux"))] Kind::Uring(opts) => { let handle = crate::runtime::Handle::current(); let driver_handle = handle.inner.driver().io(); if driver_handle.check_and_init(io_uring::opcode::OpenAt::CODE).await ? { Op::open(path.as_ref(), opts) ? . await } else { let opts = opts.clone().into(); Self::std_open(&opts, path).await } } }
+ }
+ 
+ fn std_open(opts: &StdOpenOptions, path: impl AsRef<Path>) -> io::Result<File> {
+ let path = path.as_ref().to_owned();
+ let opts = opts.clone();
+ let std = asyncify(move | | opts.open(path)).await ?;
+ Ok(File::from_std(std))
+ }
+ 
+ fn as_inner_mut(&mut self) -> &mut StdOpenOptions {
+ match &mut self.inner { Kind::Std(ref mut opts) => opts }
+ }
+ 
+}
+
+feature ! { #! [unix] impl OpenOptions { #[doc = " Sets the mode bits that a new file will be created with."] #[doc = ""] #[doc = " If a new file is created as part of an `OpenOptions::open` call then this"] #[doc = " specified `mode` will be used as the permission bits for the new file."] #[doc = " If no `mode` is set, the default of `0o666` will be used."] #[doc = " The operating system masks out bits with the system's `umask`, to produce"] #[doc = " the final permissions."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```no_run"] #[doc = " use tokio::fs::OpenOptions;"] #[doc = " use std::io;"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() -> io::Result<()> {"] #[doc = " let mut options = OpenOptions::new();"] #[doc = " options.mode(0o644); // Give read/write for owner and read for others."] #[doc = " let file = options.open(\"foo.txt\").await?;"] #[doc = ""] #[doc = " Ok(())"] #[doc = " }"] #[doc = " ```"] pub fn mode(&mut self, mode: u32) -> &mut OpenOptions { match &mut self.inner { Kind::Std(opts) => { opts.mode(mode); } #[cfg(all(tokio_unstable, feature = "io-uring", feature = "rt", feature = "fs", target_os = "linux"))] Kind::Uring(opts) => { opts.mode(mode); } } self } #[doc = " Passes custom flags to the `flags` argument of `open`."] #[doc = ""] #[doc = " The bits that define the access mode are masked out with `O_ACCMODE`, to"] #[doc = " ensure they do not interfere with the access mode set by Rusts options."] #[doc = ""] #[doc = " Custom flags can only set flags, not remove flags set by Rusts options."] #[doc = " This options overwrites any previously set custom flags."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```no_run"] #[doc = " use tokio::fs::OpenOptions;"] #[doc = " use std::io;"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() -> io::Result<()> {"] #[doc = " let mut options = OpenOptions::new();"] #[doc = " options.write(true);"] #[doc = " if cfg!(unix) {"] #[doc = " options.custom_flags(libc::O_NOFOLLOW);"] #[doc = " }"] #[doc = " let file = options.open(\"foo.txt\").await?;"] #[doc = ""] #[doc = " Ok(())"] #[doc = " }"] #[doc = " ```"] pub fn custom_flags(&mut self, flags: i32) -> &mut OpenOptions { match &mut self.inner { Kind::Std(opts) => { opts.custom_flags(flags); } #[cfg(all(tokio_unstable, feature = "io-uring", feature = "rt", feature = "fs", target_os = "linux"))] Kind::Uring(opts) => { opts.custom_flags(flags); } } self } } }
+cfg_windows ! { impl OpenOptions { #[doc = " Overrides the `dwDesiredAccess` argument to the call to [`CreateFile`]"] #[doc = " with the specified value."] #[doc = ""] #[doc = " This will override the `read`, `write`, and `append` flags on the"] #[doc = " `OpenOptions` structure. This method provides fine-grained control over"] #[doc = " the permissions to read, write and append data, attributes(like hidden"] #[doc = " and system), and extended attributes."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```no_run"] #[doc = " use tokio::fs::OpenOptions;"] #[doc = ""] #[doc = " # #[tokio::main]"] #[doc = " # async fn main() -> std::io::Result<()> {"] #[doc = " // Open without read and write permission, for example if you only need"] #[doc = " // to call `stat` on the file"] #[doc = " let file = OpenOptions::new().access_mode(0).open(\"foo.txt\").await?;"] #[doc = " # Ok(())"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " [`CreateFile`]: https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea"] pub fn access_mode(&mut self, access : u32) -> &mut OpenOptions { self.as_inner_mut().access_mode(access); self } #[doc = " Overrides the `dwShareMode` argument to the call to [`CreateFile`] with"] #[doc = " the specified value."] #[doc = ""] #[doc = " By default `share_mode` is set to"] #[doc = " `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`. This allows"] #[doc = " other processes to read, write, and delete/rename the same file"] #[doc = " while it is open. Removing any of the flags will prevent other"] #[doc = " processes from performing the corresponding operation until the file"] #[doc = " handle is closed."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```no_run"] #[doc = " use tokio::fs::OpenOptions;"] #[doc = ""] #[doc = " # #[tokio::main]"] #[doc = " # async fn main() -> std::io::Result<()> {"] #[doc = " // Do not allow others to read or modify this file while we have it open"] #[doc = " // for writing."] #[doc = " let file = OpenOptions::new()"] #[doc = " .write(true)"] #[doc = " .share_mode(0)"] #[doc = " .open(\"foo.txt\").await?;"] #[doc = " # Ok(())"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " [`CreateFile`]: https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea"] pub fn share_mode(&mut self, share : u32) -> &mut OpenOptions { self.as_inner_mut().share_mode(share); self } #[doc = " Sets extra flags for the `dwFileFlags` argument to the call to"] #[doc = " [`CreateFile2`] to the specified value(or combines it with"] #[doc = " `attributes` and `security_qos_flags` to set the `dwFlagsAndAttributes`"] #[doc = " for [`CreateFile`])."] #[doc = ""] #[doc = " Custom flags can only set flags, not remove flags set by Rust's options."] #[doc = " This option overwrites any previously set custom flags."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```no_run"] #[doc = " use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_DELETE_ON_CLOSE;"] #[doc = " use tokio::fs::OpenOptions;"] #[doc = ""] #[doc = " # #[tokio::main]"] #[doc = " # async fn main() -> std::io::Result<()> {"] #[doc = " let file = OpenOptions::new()"] #[doc = " .create(true)"] #[doc = " .write(true)"] #[doc = " .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)"] #[doc = " .open(\"foo.txt\").await?;"] #[doc = " # Ok(())"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " [`CreateFile`]: https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea"] #[doc = " [`CreateFile2`]: https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfile2"] pub fn custom_flags(&mut self, flags : u32) -> &mut OpenOptions { self.as_inner_mut().custom_flags(flags); self } #[doc = " Sets the `dwFileAttributes` argument to the call to [`CreateFile2`] to"] #[doc = " the specified value(or combines it with `custom_flags` and"] #[doc = " `security_qos_flags` to set the `dwFlagsAndAttributes` for"] #[doc = " [`CreateFile`])."] #[doc = ""] #[doc = " If a _new_ file is created because it does not yet exist and"] #[doc = " `.create(true)` or `.create_new(true)` are specified, the new file is"] #[doc = " given the attributes declared with `.attributes()`."] #[doc = ""] #[doc = " If an _existing_ file is opened with `.create(true).truncate(true)`, its"] #[doc = " existing attributes are preserved and combined with the ones declared"] #[doc = " with `.attributes()`."] #[doc = ""] #[doc = " In all other cases the attributes get ignored."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```no_run"] #[doc = " use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN;"] #[doc = " use tokio::fs::OpenOptions;"] #[doc = ""] #[doc = " # #[tokio::main]"] #[doc = " # async fn main() -> std::io::Result<()> {"] #[doc = " let file = OpenOptions::new()"] #[doc = " .write(true)"] #[doc = " .create(true)"] #[doc = " .attributes(FILE_ATTRIBUTE_HIDDEN)"] #[doc = " .open(\"foo.txt\").await?;"] #[doc = " # Ok(())"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " [`CreateFile`]: https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea"] #[doc = " [`CreateFile2`]: https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfile2"] pub fn attributes(&mut self, attributes : u32) -> &mut OpenOptions { self.as_inner_mut().attributes(attributes); self } #[doc = " Sets the `dwSecurityQosFlags` argument to the call to [`CreateFile2`] to"] #[doc = " the specified value(or combines it with `custom_flags` and `attributes`"] #[doc = " to set the `dwFlagsAndAttributes` for [`CreateFile`])."] #[doc = ""] #[doc = " By default `security_qos_flags` is not set. It should be specified when"] #[doc = " opening a named pipe, to control to which degree a server process can"] #[doc = " act on behalf of a client process(security impersonation level)."] #[doc = ""] #[doc = " When `security_qos_flags` is not set, a malicious program can gain the"] #[doc = " elevated privileges of a privileged Rust process when it allows opening"] #[doc = " user-specified paths, by tricking it into opening a named pipe. So"] #[doc = " arguably `security_qos_flags` should also be set when opening arbitrary"] #[doc = " paths. However the bits can then conflict with other flags, specifically"] #[doc = " `FILE_FLAG_OPEN_NO_RECALL`."] #[doc = ""] #[doc = " For information about possible values, see [Impersonation Levels] on the"] #[doc = " Windows Dev Center site. The `SECURITY_SQOS_PRESENT` flag is set"] #[doc = " automatically when using this method."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```no_run"] #[doc = " use windows_sys::Win32::Storage::FileSystem::SECURITY_IDENTIFICATION;"] #[doc = " use tokio::fs::OpenOptions;"] #[doc = ""] #[doc = " # #[tokio::main]"] #[doc = " # async fn main() -> std::io::Result<()> {"] #[doc = " let file = OpenOptions::new()"] #[doc = " .write(true)"] #[doc = " .create(true)"] #[doc = ""] #[doc = " // Sets the flag value to `SecurityIdentification`."] #[doc = " .security_qos_flags(SECURITY_IDENTIFICATION)"] #[doc = ""] #[doc = " .open(r\"\\\\.\\pipe\\MyPipe\").await?;"] #[doc = " # Ok(())"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " [`CreateFile`]: https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilea"] #[doc = " [`CreateFile2`]: https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfile2"] #[doc = " [Impersonation Levels]:"] #[doc = " https://docs.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-security_impersonation_level"] pub fn security_qos_flags(&mut self, flags : u32) -> &mut OpenOptions { self.as_inner_mut().security_qos_flags(flags); self } } }
+impl From<StdOpenOptions> for OpenOptions {
+ fn from(options: StdOpenOptions) -> OpenOptions {
+ OpenOptions { inner: Kind::Std(options) }
+ }
+ 
+}
+
+impl Default for OpenOptions {
+ fn default() -> Self {
+ Self::new()
+ }
+ 
+}
+

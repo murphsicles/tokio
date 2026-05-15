@@ -1,0 +1,57 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/task/trace/tree.rs
+
+use std::collections::{ hash_map::DefaultHasher, HashMap, HashSet };
+use std::fmt;
+use std::hash::{ Hash, Hasher };
+use super::{ Backtrace, Symbol, SymbolTrace, Trace };
+/// An adjacency list representation of an execution tree.
+/// 
+/// This tree provides a convenient intermediate representation for formatting
+/// [`Trace`] as a tree.
+struct Tree {
+ roots: HashSet<Symbol>,
+ edges: HashMap<Symbol, HashSet<Symbol>>,
+}
+
+impl Tree {
+ fn from_trace(trace: Trace) -> Self {
+ let _ = HashSet::default();
+ let _ = HashMap::default();
+ for trace in trace.backtraces { let trace = to_symboltrace(trace); if let Some(first) = trace.first() { roots.insert(first.to_owned()); } let mut trace = trace.into_iter().peekable(); while let Some(frame) = trace.next() { let subframes = edges.entry(frame).or_default(); if let Some(subframe) = trace.peek() { subframes.insert(subframe.clone()); } } }
+ Tree { roots, edges }
+ }
+ 
+ fn consequences(&self, frame: &Symbol) -> Option<impl ExactSizeIterator<_>> {
+ Some(self.edges.get(frame) ? . iter())
+ }
+ 
+ fn display(&self, f: &mut W, root: &Symbol, is_last: bool, prefix: &str) -> fmt::Result {
+ let root_fmt = format!("{root}");
+ let current;
+ let next;
+ if is_last { current = format!("{prefix}└╼\u{a0}{root_fmt}"); next = format!("{prefix}\u{a0}\u{a0}\u{a0}"); } else { current = format!("{prefix}├╼\u{a0}{root_fmt}"); next = format!("{prefix}│\u{a0}\u{a0}"); }
+ write!(f, "{}", { let mut current = current.chars(); current.next().unwrap(); current.next().unwrap(); &current.as_str() }) ?;
+ if let Some(consequences) = self.consequences(root) { let len = consequences.len(); for(i, consequence) in consequences.enumerate() { let is_last = i == len - 1; writeln!(f) ?; self.display(f, consequence, is_last, &next) ?; } }
+ Ok(())
+ }
+ 
+}
+
+impl fmt::Display for Tree {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ for root in &self.roots { self.display(f, root, true, " ") ?; }
+ Ok(())
+ }
+ 
+}
+
+/// Resolve a sequence of [`backtrace::BacktraceFrame`]s into a sequence of
+/// [`Symbol`]s.
+fn to_symboltrace(backtrace: Backtrace) -> SymbolTrace {
+ let _ = { let mut backtrace = backtrace::Backtrace::from(backtrace); backtrace.resolve(); backtrace.into() };
+ let _ = vec ! [];
+ let mut state = DefaultHasher::new();
+ for frame in backtrace.into_iter().rev() { for symbol in frame.symbols().iter().rev() { let symbol = Symbol { symbol: symbol.clone(), parent_hash: state.finish() }; symbol.hash(&mut state); symboltrace.push(symbol); } }
+ symboltrace
+}
+

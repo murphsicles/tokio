@@ -1,0 +1,483 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/io/async_fd.rs
+
+use crate::io::{ Interest, Ready };
+use crate::runtime::io::{ ReadyEvent, Registration };
+use crate::runtime::scheduler;
+use mio::unix::SourceFd;
+use std::error::Error;
+use std::fmt;
+use std::io;
+use std::os::unix::io::{ AsRawFd, RawFd };
+use std::task::{ ready, Context, Poll };
+/// Associates an IO object backed by a Unix file descriptor with the tokio
+/// reactor, allowing for readiness to be polled. The file descriptor must be of
+/// a type that can be used with the OS polling facilities(ie, `poll`, `epoll`,
+/// `kqueue`, etc), such as a network socket or pipe, and the file descriptor
+/// must have the nonblocking mode set to true.
+/// 
+/// Creating an [`AsyncFd`] registers the file descriptor with the current tokio
+/// Reactor, allowing you to directly await the file descriptor being readable
+/// or writable. Once registered, the file descriptor remains registered until
+/// the [`AsyncFd`] is dropped.
+/// 
+/// The [`AsyncFd`] takes ownership of an arbitrary object to represent the IO
+/// object. It is intended that the inner object will handle closing the file
+/// descriptor when it is dropped, avoiding resource leaks and ensuring that the
+/// [`AsyncFd`] can clean up the registration before closing the file descriptor.
+/// The [`AsyncFd::into_inner`] function can be used to extract the inner object
+/// to retake control from the tokio IO reactor. The [`OwnedFd`] type is often
+/// used as the inner object, as it is the simplest type that closes the fd on
+/// drop.
+/// 
+/// The inner object is required to implement [`AsRawFd`]. This file descriptor
+/// must not change while [`AsyncFd`] owns the inner object, i.e. the
+/// [`AsRawFd::as_raw_fd`] method on the inner type must always return the same
+/// file descriptor when called multiple times. Failure to uphold this results
+/// in unspecified behavior in the IO driver, which may include breaking
+/// notifications for other sockets/etc.
+/// 
+/// Polling for readiness is done by calling the async functions [`readable`]
+/// and [`writable`]. These functions complete when the associated readiness
+/// condition is observed. Any number of tasks can query the same `AsyncFd` in
+/// parallel, on the same or different conditions.
+/// 
+/// On some platforms, the readiness detecting mechanism relies on
+/// edge-triggered notifications. This means that the OS will only notify Tokio
+/// when the file descriptor transitions from not-ready to ready. For this to
+/// work you should first try to read or write and only poll for readiness
+/// if that fails with an error of [`std::io::ErrorKind::WouldBlock`].
+/// 
+/// Tokio internally tracks when it has received a ready notification, and when
+/// readiness checking functions like [`readable`] and [`writable`] are called,
+/// if the readiness flag is set, these async functions will complete
+/// immediately. This however does mean that it is critical to ensure that this
+/// ready flag is cleared when(and only when) the file descriptor ceases to be
+/// ready. The [`AsyncFdReadyGuard`] returned from readiness checking functions
+/// serves this function; after calling a readiness-checking async function,
+/// you must use this [`AsyncFdReadyGuard`] to signal to tokio whether the file
+/// descriptor is no longer in a ready state.
+/// 
+/// ## Use with to a poll-based API
+/// 
+/// In some cases it may be desirable to use `AsyncFd` from APIs similar to
+/// [`TcpStream::poll_read_ready`]. The [`AsyncFd::poll_read_ready`] and
+/// [`AsyncFd::poll_write_ready`] functions are provided for this purpose.
+/// Because these functions don't create a future to hold their state, they have
+/// the limitation that only one task can wait on each direction(read or write)
+/// at a time.
+/// 
+/// # Examples
+/// 
+/// This example shows how to turn [`std::net::TcpStream`] asynchronous using
+/// `AsyncFd`. It implements the read/write operations both as an `async fn`
+/// and using the IO traits [`AsyncRead`] and [`AsyncWrite`].
+/// 
+/// ```no_run
+/// use std::io::{self, Read, Write};
+/// use std::net::TcpStream;
+/// use std::pin::Pin;
+/// use std::task::{ready, Context, Poll};
+/// use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+/// use tokio::io::unix::AsyncFd;
+/// 
+/// pub struct AsyncTcpStream {
+/// inner: AsyncFd<TcpStream>,
+/// }
+/// 
+/// impl AsyncTcpStream {
+/// pub fn new(tcp: TcpStream) -> io::Result<Self> {
+/// tcp.set_nonblocking(true)?;
+/// Ok(Self {
+/// inner: AsyncFd::new(tcp)?,
+/// })
+/// }
+/// 
+/// pub async fn read(&self, out: &mut [u8]) -> io::Result<usize> {
+/// loop {
+/// let mut guard = self.inner.readable().await?;
+/// 
+/// match guard.try_io(|inner| inner.get_ref().read(out)) {
+/// Ok(result) => return result,
+/// Err(_would_block) => continue,
+/// }
+/// }
+/// }
+/// 
+/// pub async fn write(&self, buf: &[u8]) -> io::Result<usize> {
+/// loop {
+/// let mut guard = self.inner.writable().await?;
+/// 
+/// match guard.try_io(|inner| inner.get_ref().write(buf)) {
+/// Ok(result) => return result,
+/// Err(_would_block) => continue,
+/// }
+/// }
+/// }
+/// }
+/// 
+/// impl AsyncRead for AsyncTcpStream {
+/// fn poll_read(
+/// self: Pin<&mut Self>,
+/// cx: &mut Context<'_>,
+/// buf: &mut ReadBuf<'_>
+/// ) -> Poll<io::Result<()>> {
+/// loop {
+/// let mut guard = ready!(self.inner.poll_read_ready(cx))?;
+/// 
+/// let unfilled = buf.initialize_unfilled();
+/// match guard.try_io(|inner| inner.get_ref().read(unfilled)) {
+/// Ok(Ok(len)) => {
+/// buf.advance(len);
+/// return Poll::Ready(Ok(()));
+/// },
+/// Ok(Err(err)) => return Poll::Ready(Err(err)),
+/// Err(_would_block) => continue,
+/// }
+/// }
+/// }
+/// }
+/// 
+/// impl AsyncWrite for AsyncTcpStream {
+/// fn poll_write(
+/// self: Pin<&mut Self>,
+/// cx: &mut Context<'_>,
+/// buf: &[u8]
+/// ) -> Poll<io::Result<usize>> {
+/// loop {
+/// let mut guard = ready!(self.inner.poll_write_ready(cx))?;
+/// 
+/// match guard.try_io(|inner| inner.get_ref().write(buf)) {
+/// Ok(result) => return Poll::Ready(result),
+/// Err(_would_block) => continue,
+/// }
+/// }
+/// }
+/// 
+/// fn poll_flush(
+/// self: Pin<&mut Self>,
+/// cx: &mut Context<'_>,
+/// ) -> Poll<io::Result<()>> {
+/// // tcp flush is a no-op
+/// Poll::Ready(Ok(()))
+/// }
+/// 
+/// fn poll_shutdown(
+/// self: Pin<&mut Self>,
+/// cx: &mut Context<'_>,
+/// ) -> Poll<io::Result<()>> {
+/// self.inner.get_ref().shutdown(std::net::Shutdown::Write)?;
+/// Poll::Ready(Ok(()))
+/// }
+/// }
+/// ```
+/// 
+/// [`readable`]: method@Self::readable
+/// [`writable`]: method@Self::writable
+/// [`AsyncFdReadyGuard`]: struct@self::AsyncFdReadyGuard
+/// [`TcpStream::poll_read_ready`]: struct@crate::net::TcpStream
+/// [`AsyncRead`]: trait@crate::io::AsyncRead
+/// [`AsyncWrite`]: trait@crate::io::AsyncWrite
+/// [`OwnedFd`]: struct@std::os::fd::OwnedFd
+pub struct AsyncFd<T: AsRawFd> {
+ registration: Registration,
+ inner: Option<T>,
+}
+
+/// Represents an IO-ready event detected on a particular file descriptor that
+/// has not yet been acknowledged. This is a `must_use` structure to help ensure
+/// that you do not forget to explicitly clear(or not clear) the event.
+/// 
+/// This type exposes an immutable reference to the underlying IO object.
+#[must_use = "You must explicitly choose whether to clear the readiness state by calling a method on ReadyGuard"]
+pub struct AsyncFdReadyGuard<a, T: AsRawFd> {
+ async_fd: &AsyncFd<T>,
+ event: Option<ReadyEvent>,
+}
+
+/// Represents an IO-ready event detected on a particular file descriptor that
+/// has not yet been acknowledged. This is a `must_use` structure to help ensure
+/// that you do not forget to explicitly clear(or not clear) the event.
+/// 
+/// This type exposes a mutable reference to the underlying IO object.
+#[must_use = "You must explicitly choose whether to clear the readiness state by calling a method on ReadyGuard"]
+pub struct AsyncFdReadyMutGuard<a, T: AsRawFd> {
+ async_fd: &mut AsyncFd<T>,
+ event: Option<ReadyEvent>,
+}
+
+impl<T: AsRawFd> AsyncFd<T> {
+ pub fn new(inner: T) -> io::Result<Self> {
+ Self::with_interest(inner, Interest::READABLE | Interest::WRITABLE)
+ }
+ 
+ pub fn with_interest(inner: T, interest: Interest) -> io::Result<Self> {
+ Self::new_with_handle_and_interest(inner, scheduler::Handle::current(), interest)
+ }
+ 
+ fn new_with_handle_and_interest(inner: T, handle: scheduler::Handle, interest: Interest) -> io::Result<Self> {
+ Self::try_new_with_handle_and_interest(inner, handle, interest).map_err(Into::into)
+ }
+ 
+ pub fn try_new(inner: T) -> Result<Self, AsyncFdTryNewError<T>> {
+ Self::try_with_interest(inner, Interest::READABLE | Interest::WRITABLE)
+ }
+ 
+ pub fn try_with_interest(inner: T, interest: Interest) -> Result<Self, AsyncFdTryNewError<T>> {
+ Self::try_new_with_handle_and_interest(inner, scheduler::Handle::current(), interest)
+ }
+ 
+ fn try_new_with_handle_and_interest(inner: T, handle: scheduler::Handle, interest: Interest) -> Result<Self, AsyncFdTryNewError<T>> {
+ let fd = inner.as_raw_fd();
+ match Registration::new_with_interest_and_handle(&mut SourceFd(&fd), interest, handle) { Ok(registration) => Ok(AsyncFd { registration, inner: Some(inner) }), Err(cause) => Err(AsyncFdTryNewError { inner, cause }) }
+ }
+ 
+ pub fn get_ref(&self) -> &T {
+ self.inner.as_ref().unwrap()
+ }
+ 
+ pub fn get_mut(&mut self) -> &mut T {
+ self.inner.as_mut().unwrap()
+ }
+ 
+ fn take_inner(&mut self) -> Option<T> {
+ let inner = self.inner.take() ?;
+ let fd = inner.as_raw_fd();
+ let _ = self.registration.deregister(&mut SourceFd(&fd));
+ Some(inner)
+ }
+ 
+ pub fn into_inner(self) -> T {
+ self.take_inner().unwrap()
+ }
+ 
+ pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<AsyncFdReadyGuard<'a, T>>> {
+ let event = ready!(self.registration.poll_read_ready(cx)) ?;
+ Poll::Ready(Ok(AsyncFdReadyGuard { async_fd: self, event: Some(event) }))
+ }
+ 
+ pub fn poll_read_ready_mut(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<AsyncFdReadyMutGuard<'a, T>>> {
+ let event = ready!(self.registration.poll_read_ready(cx)) ?;
+ Poll::Ready(Ok(AsyncFdReadyMutGuard { async_fd: self, event: Some(event) }))
+ }
+ 
+ pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<AsyncFdReadyGuard<'a, T>>> {
+ let event = ready!(self.registration.poll_write_ready(cx)) ?;
+ Poll::Ready(Ok(AsyncFdReadyGuard { async_fd: self, event: Some(event) }))
+ }
+ 
+ pub fn poll_write_ready_mut(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<AsyncFdReadyMutGuard<'a, T>>> {
+ let event = ready!(self.registration.poll_write_ready(cx)) ?;
+ Poll::Ready(Ok(AsyncFdReadyMutGuard { async_fd: self, event: Some(event) }))
+ }
+ 
+ pub fn ready(&self, interest: Interest) -> io::Result<AsyncFdReadyGuard<'_, T>> {
+ let event = self.registration.readiness(interest).await ?;
+ Ok(AsyncFdReadyGuard { async_fd: self, event: Some(event) })
+ }
+ 
+ pub fn ready_mut(&mut self, interest: Interest) -> io::Result<AsyncFdReadyMutGuard<'_, T>> {
+ let event = self.registration.readiness(interest).await ?;
+ Ok(AsyncFdReadyMutGuard { async_fd: self, event: Some(event) })
+ }
+ 
+ pub fn readable(&self) -> io::Result<AsyncFdReadyGuard<'a, T>> {
+ self.ready(Interest::READABLE).await
+ }
+ 
+ pub fn readable_mut(&mut self) -> io::Result<AsyncFdReadyMutGuard<'a, T>> {
+ self.ready_mut(Interest::READABLE).await
+ }
+ 
+ pub fn writable(&self) -> io::Result<AsyncFdReadyGuard<'a, T>> {
+ self.ready(Interest::WRITABLE).await
+ }
+ 
+ pub fn writable_mut(&mut self) -> io::Result<AsyncFdReadyMutGuard<'a, T>> {
+ self.ready_mut(Interest::WRITABLE).await
+ }
+ 
+ pub fn async_io(&self, interest: Interest, f: impl FnMut) -> io::Result<R> {
+ self.registration.async_io(interest, | | f(self.get_ref())).await
+ }
+ 
+ pub fn async_io_mut(&mut self, interest: Interest, f: impl FnMut) -> io::Result<R> {
+ self.registration.async_io(interest, | | f(self.inner.as_mut().unwrap())).await
+ }
+ 
+ pub fn try_io(&self, interest: Interest, f: impl FnOnce) -> io::Result<R> {
+ self.registration.try_io(interest, | | f(self.inner.as_ref().unwrap()))
+ }
+ 
+ pub fn try_io_mut(&mut self, interest: Interest, f: impl FnOnce) -> io::Result<R> {
+ self.registration.try_io(interest, | | f(self.inner.as_mut().unwrap()))
+ }
+ 
+}
+
+impl<T: AsRawFd> AsRawFd for AsyncFd<T> {
+ fn as_raw_fd(&self) -> RawFd {
+ self.inner.as_ref().unwrap().as_raw_fd()
+ }
+ 
+}
+
+impl<T: AsRawFd> std::os::unix::io::AsFd for AsyncFd<T> {
+ fn as_fd(&self) -> std::os::unix::io::BorrowedFd<'_> {
+ unsafe { std::os::unix::io::BorrowedFd::borrow_raw(self.as_raw_fd()) }
+ }
+ 
+}
+
+impl<T: std::fmt::Debug + AsRawFd> std::fmt::Debug for AsyncFd<T> {
+ fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+ f.debug_struct("AsyncFd").field("inner", &self.inner).finish()
+ }
+ 
+}
+
+impl<T: AsRawFd> Drop for AsyncFd<T> {
+ fn drop(&mut self) {
+ let _ = self.take_inner();
+ }
+ 
+}
+
+impl<a, Inner: AsRawFd> AsyncFdReadyGuard<'a, Inner> {
+ pub fn clear_ready(&mut self) {
+ if let Some(event) = self.event.take() { self.async_fd.registration.clear_readiness(event); }
+ }
+ 
+ pub fn clear_ready_matching(&mut self, ready: Ready) {
+ if let Some(mut event) = self.event.take() { self.async_fd.registration.clear_readiness(event.with_ready(ready)); event.ready = event.ready - ready; if ! event.ready.is_empty() { self.event = Some(event); } }
+ }
+ 
+ pub fn retain_ready(&mut self) {
+ }
+ 
+ pub fn ready(&self) -> Ready {
+ match &self.event { Some(event) => event.ready, None => Ready::EMPTY }
+ }
+ 
+ pub fn try_io(&mut self, f: impl FnOnce) -> Result<io::Result<R>, TryIoError> {
+ let result = f(self.async_fd);
+ match result { Err(err) if err.kind() == io::ErrorKind::WouldBlock => { self.clear_ready(); Err(TryIoError(())) } result => Ok(result) }
+ }
+ 
+ pub fn get_ref(&self) -> &AsyncFd<Inner> {
+ self.async_fd
+ }
+ 
+ pub fn get_inner(&self) -> &Inner {
+ self.get_ref().get_ref()
+ }
+ 
+}
+
+impl<a, Inner: AsRawFd> AsyncFdReadyMutGuard<'a, Inner> {
+ pub fn clear_ready(&mut self) {
+ if let Some(event) = self.event.take() { self.async_fd.registration.clear_readiness(event); }
+ }
+ 
+ pub fn clear_ready_matching(&mut self, ready: Ready) {
+ if let Some(mut event) = self.event.take() { self.async_fd.registration.clear_readiness(event.with_ready(ready)); event.ready = event.ready - ready; if ! event.ready.is_empty() { self.event = Some(event); } }
+ }
+ 
+ pub fn retain_ready(&mut self) {
+ }
+ 
+ pub fn ready(&self) -> Ready {
+ match &self.event { Some(event) => event.ready, None => Ready::EMPTY }
+ }
+ 
+ pub fn try_io(&mut self, f: impl FnOnce) -> Result<io::Result<R>, TryIoError> {
+ let result = f(self.async_fd);
+ match result { Err(err) if err.kind() == io::ErrorKind::WouldBlock => { self.clear_ready(); Err(TryIoError(())) } result => Ok(result) }
+ }
+ 
+ pub fn get_ref(&self) -> &AsyncFd<Inner> {
+ self.async_fd
+ }
+ 
+ pub fn get_mut(&mut self) -> &mut AsyncFd<Inner> {
+ self.async_fd
+ }
+ 
+ pub fn get_inner(&self) -> &Inner {
+ self.get_ref().get_ref()
+ }
+ 
+ pub fn get_inner_mut(&mut self) -> &mut Inner {
+ self.get_mut().get_mut()
+ }
+ 
+}
+
+impl<a, T: std::fmt::Debug + AsRawFd> std::fmt::Debug for AsyncFdReadyGuard<'a, T> {
+ fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+ f.debug_struct("ReadyGuard").field("async_fd", &self.async_fd).finish()
+ }
+ 
+}
+
+impl<a, T: std::fmt::Debug + AsRawFd> std::fmt::Debug for AsyncFdReadyMutGuard<'a, T> {
+ fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+ f.debug_struct("MutReadyGuard").field("async_fd", &self.async_fd).finish()
+ }
+ 
+}
+
+/// The error type returned by [`try_io`].
+/// 
+/// This error indicates that the IO resource returned a [`WouldBlock`] error.
+/// 
+/// [`WouldBlock`]: std::io::ErrorKind::WouldBlock
+/// [`try_io`]: method@AsyncFdReadyGuard::try_io
+#[derive(Debug)]
+pub struct TryIoError {
+ (()),
+}
+
+/// Error returned by [`try_new`] or [`try_with_interest`].
+/// 
+/// [`try_new`]: AsyncFd::try_new
+/// [`try_with_interest`]: AsyncFd::try_with_interest
+pub struct AsyncFdTryNewError<T> {
+ inner: T,
+ cause: io::Error,
+}
+
+impl<T> AsyncFdTryNewError<T> {
+ pub fn into_parts(self) ->(T, io::Error) {
+ (self.inner, self.cause)
+ }
+ 
+}
+
+impl<T> fmt::Display for AsyncFdTryNewError<T> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ fmt::Display::fmt(&self.cause, f)
+ }
+ 
+}
+
+impl<T> fmt::Debug for AsyncFdTryNewError<T> {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ fmt::Debug::fmt(&self.cause, f)
+ }
+ 
+}
+
+impl<T> Error for AsyncFdTryNewError<T> {
+ fn source(&self) -> Option<&(_)> {
+ Some(&self.cause)
+ }
+ 
+}
+
+impl<T> From<AsyncFdTryNewError<T>> for io::Error {
+ fn from(value: AsyncFdTryNewError<T>) -> Self {
+ value.cause
+ }
+ 
+}
+

@@ -1,0 +1,46 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/io/stdout.rs
+
+use crate::io::blocking::Blocking;
+use crate::io::stdio_common::SplitByUtf8BoundaryIfWindows;
+use crate::io::AsyncWrite;
+use std::io;
+use std::pin::Pin;
+use std::task::Context;
+use std::task::Poll;
+cfg_io_std ! { #[doc = " A handle to the standard output stream of a process."] #[doc = ""] #[doc = " Concurrent writes to stdout must be executed with care: Only individual"] #[doc = " writes to this [`AsyncWrite`] are guaranteed to be intact. In particular"] #[doc = " you should be aware that writes using [`write_all`] are not guaranteed"] #[doc = " to occur as a single write, so multiple threads writing data with"] #[doc = " [`write_all`] may result in interleaved output."] #[doc = ""] #[doc = " Created by the [`stdout`] function."] #[doc = ""] #[doc = " [`stdout`]: stdout()"] #[doc = " [`AsyncWrite`]: AsyncWrite"] #[doc = " [`write_all`]: crate::io::AsyncWriteExt::write_all()"] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```"] #[doc = " use tokio::io::{self, AsyncWriteExt};"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() -> io::Result<()> {"] #[doc = " let mut stdout = io::stdout();"] #[doc = " stdout.write_all(b\"Hello world!\").await?;"] #[doc = " Ok(())"] #[doc = " }"] #[doc = " ```"] #[doc = ""] #[doc = " The following is an example of using `stdio` with loop."] #[doc = ""] #[doc = " ```"] #[doc = " use tokio::io::{self, AsyncWriteExt};"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() {"] #[doc = " let messages = vec![\"hello\", \" world\\n\"];"] #[doc = ""] #[doc = " // When you use `stdio` in a loop, it is recommended to create"] #[doc = " // a single `stdio` instance outside the loop and call a write"] #[doc = " // operation against that instance on each loop."] #[doc = " //"] #[doc = " // Repeatedly creating `stdout` instances inside the loop and"] #[doc = " // writing to that handle could result in mangled output since"] #[doc = " // each write operation is handled by a different blocking thread."] #[doc = " let mut stdout = io::stdout();"] #[doc = ""] #[doc = " for message in &messages {"] #[doc = " stdout.write_all(message.as_bytes()).await.unwrap();"] #[doc = " stdout.flush().await.unwrap();"] #[doc = " }"] #[doc = " }"] #[doc = " ```"] #[derive(Debug)] pub struct Stdout { std: SplitByUtf8BoundaryIfWindows < Blocking<std::io::Stdout>> } #[doc = " Constructs a new handle to the standard output of the current process."] #[doc = ""] #[doc = " The returned handle allows writing to standard out from the within the"] #[doc = " Tokio runtime."] #[doc = ""] #[doc = " Concurrent writes to stdout must be executed with care: Only individual"] #[doc = " writes to this [`AsyncWrite`] are guaranteed to be intact. In particular"] #[doc = " you should be aware that writes using [`write_all`] are not guaranteed"] #[doc = " to occur as a single write, so multiple threads writing data with"] #[doc = " [`write_all`] may result in interleaved output."] #[doc = ""] #[doc = " Note that unlike [`std::io::stdout`], each call to this `stdout()`"] #[doc = " produces a new writer, so for example, this program does **not**flush stdout:"] #[doc = ""] #[doc = " ```no_run"] #[doc = " # use tokio::io::AsyncWriteExt;"] #[doc = " # #[tokio::main]"] #[doc = " # async fn main() -> std::io::Result<()> {"] #[doc = " tokio::io::stdout().write_all(b\"aa\").await?;"] #[doc = " tokio::io::stdout().flush().await?;"] #[doc = " # Ok(())"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " [`std::io::stdout`]: std::io::stdout"] #[doc = " [`AsyncWrite`]: AsyncWrite"] #[doc = " [`write_all`]: crate::io::AsyncWriteExt::write_all()"] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```"] #[doc = " use tokio::io::{self, AsyncWriteExt};"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() -> io::Result<()> {"] #[doc = " let mut stdout = io::stdout();"] #[doc = " stdout.write_all(b\"Hello world!\").await?;"] #[doc = " Ok(())"] #[doc = " }"] #[doc = " ```"] #[doc = ""] #[doc = " The following is an example of using `stdio` with loop."] #[doc = ""] #[doc = " ```"] #[doc = " use tokio::io::{self, AsyncWriteExt};"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() {"] #[doc = " let messages = vec![\"hello\", \" world\\n\"];"] #[doc = ""] #[doc = " // When you use `stdio` in a loop, it is recommended to create"] #[doc = " // a single `stdio` instance outside the loop and call a write"] #[doc = " // operation against that instance on each loop."] #[doc = " //"] #[doc = " // Repeatedly creating `stdout` instances inside the loop and"] #[doc = " // writing to that handle could result in mangled output since"] #[doc = " // each write operation is handled by a different blocking thread."] #[doc = " let mut stdout = io::stdout();"] #[doc = ""] #[doc = " for message in &messages {"] #[doc = " stdout.write_all(message.as_bytes()).await.unwrap();"] #[doc = " stdout.flush().await.unwrap();"] #[doc = " }"] #[doc = " }"] #[doc = " ```"] pub fn stdout() -> Stdout { let std = io::stdout(); let blocking = unsafe { Blocking::new(std) }; Stdout { std: SplitByUtf8BoundaryIfWindows::new(blocking) } } }
+#[cfg(unix)]
+mod sys {
+ use std::os::unix::io::{ AsFd, AsRawFd, BorrowedFd, RawFd };
+ use super::Stdout;
+ impl AsRawFd for Stdout {
+ fn as_raw_fd(&self) -> RawFd {
+ std::io::stdout().as_raw_fd()
+ }
+ 
+ }
+ 
+ impl AsFd for Stdout {
+ fn as_fd(&self) -> BorrowedFd<'_> {
+ unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+ }
+ 
+ }
+ 
+}
+
+cfg_windows ! { use crate::os::windows::io::{ AsHandle, BorrowedHandle, AsRawHandle, RawHandle }; impl AsRawHandle for Stdout { fn as_raw_handle(&self) -> RawHandle { std::io::stdout().as_raw_handle() } } impl AsHandle for Stdout { fn as_handle(&self) -> BorrowedHandle <'_ > { unsafe { BorrowedHandle::borrow_raw(self.as_raw_handle()) } } } }
+impl AsyncWrite for Stdout {
+ fn poll_write(self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ Pin::new(&mut self.std).poll_write(cx, buf)
+ }
+ 
+ fn poll_flush(self, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+ Pin::new(&mut self.std).poll_flush(cx)
+ }
+ 
+ fn poll_shutdown(self, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+ Pin::new(&mut self.std).poll_shutdown(cx)
+ }
+ 
+}
+

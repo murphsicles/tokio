@@ -1,0 +1,31 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/util/sync_wrapper.rs
+
+use std::any::Any;
+struct SyncWrapper<T> {
+ value: T,
+}
+
+unsafe impl<T: Send> Send for SyncWrapper<T> {
+}
+
+unsafe impl<T> Sync for SyncWrapper<T> {
+}
+
+impl<T> SyncWrapper<T> {
+ fn new(value: T) -> Self {
+ Self { value }
+ }
+ 
+ fn into_inner(self) -> T {
+ self.value
+ }
+ 
+}
+
+impl SyncWrapper<Box<_>> {
+ fn downcast_ref_sync(&self) -> Option<&T> {
+ self.value.downcast_ref()
+ }
+ 
+}
+

@@ -1,0 +1,153 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/net/tcp/split.rs
+
+use crate::io::{ AsyncRead, AsyncWrite, Interest, ReadBuf, Ready };
+use crate::net::TcpStream;
+use std::future::poll_fn;
+use std::io;
+use std::net::{ Shutdown, SocketAddr };
+use std::pin::Pin;
+use std::task::{ Context, Poll };
+cfg_io_util ! { use bytes::BufMut; }
+/// Borrowed read half of a [`TcpStream`], created by [`split`].
+/// 
+/// Reading from a `ReadHalf` is usually done using the convenience methods found on the
+/// [`AsyncReadExt`] trait.
+/// 
+/// [`TcpStream`]: TcpStream
+/// [`split`]: TcpStream::split()
+/// [`AsyncReadExt`]: trait@crate::io::AsyncReadExt
+#[derive(Debug)]
+pub struct ReadHalf<a> {
+ (&TcpStream),
+}
+
+/// Borrowed write half of a [`TcpStream`], created by [`split`].
+/// 
+/// Note that in the [`AsyncWrite`] implementation of this type, [`poll_shutdown`] will
+/// shut down the TCP stream in the write direction.
+/// 
+/// Writing to an `WriteHalf` is usually done using the convenience methods found
+/// on the [`AsyncWriteExt`] trait.
+/// 
+/// [`TcpStream`]: TcpStream
+/// [`split`]: TcpStream::split()
+/// [`AsyncWrite`]: trait@crate::io::AsyncWrite
+/// [`poll_shutdown`]: fn@crate::io::AsyncWrite::poll_shutdown
+/// [`AsyncWriteExt`]: trait@crate::io::AsyncWriteExt
+#[derive(Debug)]
+pub struct WriteHalf<a> {
+ (&TcpStream),
+}
+
+fn split(stream: &mut TcpStream) ->(ReadHalf<'_>, WriteHalf<'_>) {
+ (ReadHalf(&*stream), WriteHalf(&*stream))
+}
+
+impl ReadHalf<'_> {
+ pub fn poll_peek(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<usize>> {
+ self.0.poll_peek(cx, buf)
+ }
+ 
+ pub fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+ let mut buf = ReadBuf::new(buf);
+ poll_fn(| cx | self.poll_peek(cx, &mut buf)).await
+ }
+ 
+ pub fn ready(&self, interest: Interest) -> io::Result<Ready> {
+ self.0.ready(interest).await
+ }
+ 
+ pub fn readable(&self) -> io::Result<()> {
+ self.0.readable().await
+ }
+ 
+ pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+ self.0.try_read(buf)
+ }
+ 
+ pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+ self.0.try_read_vectored(bufs)
+ }
+ 
+ // [unsupported impl item]
+ pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+ self.0.peer_addr()
+ }
+ 
+ pub fn local_addr(&self) -> io::Result<SocketAddr> {
+ self.0.local_addr()
+ }
+ 
+}
+
+impl WriteHalf<'_> {
+ pub fn ready(&self, interest: Interest) -> io::Result<Ready> {
+ self.0.ready(interest).await
+ }
+ 
+ pub fn writable(&self) -> io::Result<()> {
+ self.0.writable().await
+ }
+ 
+ pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+ self.0.try_write(buf)
+ }
+ 
+ pub fn try_write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+ self.0.try_write_vectored(bufs)
+ }
+ 
+ pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+ self.0.peer_addr()
+ }
+ 
+ pub fn local_addr(&self) -> io::Result<SocketAddr> {
+ self.0.local_addr()
+ }
+ 
+}
+
+impl AsyncRead for ReadHalf<'_> {
+ fn poll_read(self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+ self.0.poll_read_priv(cx, buf)
+ }
+ 
+}
+
+impl AsyncWrite for WriteHalf<'_> {
+ fn poll_write(self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ self.0.poll_write_priv(cx, buf)
+ }
+ 
+ fn poll_write_vectored(self, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ self.0.poll_write_vectored_priv(cx, bufs)
+ }
+ 
+ fn is_write_vectored(&self) -> bool {
+ self.0.is_write_vectored()
+ }
+ 
+ fn poll_flush(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(Ok(()))
+ }
+ 
+ fn poll_shutdown(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.0.shutdown_std(Shutdown::Write).into()
+ }
+ 
+}
+
+impl AsRef<TcpStream> for ReadHalf<'_> {
+ fn as_ref(&self) -> &TcpStream {
+ self.0
+ }
+ 
+}
+
+impl AsRef<TcpStream> for WriteHalf<'_> {
+ fn as_ref(&self) -> &TcpStream {
+ self.0
+ }
+ 
+}
+

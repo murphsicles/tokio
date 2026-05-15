@@ -1,0 +1,263 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/util/idle_notified_set.rs
+
+use std::marker::PhantomPinned;
+use std::mem::ManuallyDrop;
+use std::ptr::NonNull;
+use std::task::{ Context, Waker };
+use crate::loom::cell::UnsafeCell;
+use crate::loom::sync::{ Arc, Mutex };
+use crate::util::linked_list::{ self, Link };
+use crate::util::{ waker_ref, Wake };
+type LinkedList<T> = linked_list::LinkedList<ListEntry<T>, linked_list::Link::Target>;
+
+/// This is the main handle to the collection.
+struct IdleNotifiedSet<T> {
+ lists: Arc<Lists<T>>,
+ length: usize,
+}
+
+/// A handle to an entry that is guaranteed to be stored in the idle or notified
+/// list of its `IdleNotifiedSet`. This value borrows the `IdleNotifiedSet`
+/// mutably to prevent the entry from being moved to the `Neither` list, which
+/// only the `IdleNotifiedSet` may do.
+/// 
+/// The main consequence of being stored in one of the lists is that the `value`
+/// field has not yet been consumed.
+/// 
+/// Note: This entry can be moved from the idle to the notified list while this
+/// object exists by waking its waker.
+struct EntryInOneOfTheLists<a, T> {
+ entry: Arc<ListEntry<T>>,
+ set: &mut IdleNotifiedSet<T>,
+}
+
+type Lists<T> = Mutex<ListsInner<T>>;
+
+/// The linked lists hold strong references to the `ListEntry` items, and the
+/// `ListEntry` items also hold a strong reference back to the Lists object, but
+/// the destructor of the `IdleNotifiedSet` will clear the two lists, so once
+/// that object is destroyed, no ref-cycles will remain.
+struct ListsInner<T> {
+ notified: LinkedList<T>,
+ idle: LinkedList<T>,
+ waker: Option<Waker>,
+}
+
+/// Which of the two lists in the shared Lists object is this entry stored in?
+/// 
+/// If the value is `Idle`, then an entry's waker may move it to the notified
+/// list. Otherwise, only the `IdleNotifiedSet` may move it.
+/// 
+/// If the value is `Neither`, then it is still possible that the entry is in
+/// some third external list(this happens in `drain`).
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum List {
+ Notified,
+ Idle,
+ Neither,
+}
+
+/// An entry in the list.
+/// 
+/// # Safety
+/// 
+/// The `my_list` field must only be accessed while holding the mutex in
+/// `parent`. It is an invariant that the value of `my_list` corresponds to
+/// which linked list in the `parent` holds this entry. Once this field takes
+/// the value `Neither`, then it may never be modified again.
+/// 
+/// If the value of `my_list` is `Notified` or `Idle`, then the `pointers` field
+/// must only be accessed while holding the mutex. If the value of `my_list` is
+/// `Neither`, then the `pointers` field may be accessed by the
+/// `IdleNotifiedSet` (this happens inside `drain`).
+/// 
+/// The `value` field is owned by the `IdleNotifiedSet` and may only be accessed
+/// by the `IdleNotifiedSet`. The operation that sets the value of `my_list` to
+/// `Neither` assumes ownership of the `value`, and it must either drop it or
+/// move it out from this entry to prevent it from getting leaked. (Since the
+/// two linked lists are emptied in the destructor of `IdleNotifiedSet`, the
+/// value should not be leaked.)
+struct ListEntry<T> {
+ pointers: linked_list::Pointers<ListEntry<T>>,
+ parent: Arc<Lists<T>>,
+ value: UnsafeCell<ManuallyDrop<T>>,
+ my_list: UnsafeCell<List>,
+ _pin: PhantomPinned,
+}
+
+generate_addr_of_methods ! { impl<T> ListEntry<T> { unsafe fn addr_of_pointers(self: NonNull<Self>) -> NonNull < linked_list::Pointers < ListEntry<T>>> { &self.pointers } } }
+unsafe impl<T: Send> Send for IdleNotifiedSet<T> {
+}
+
+unsafe impl<T: Sync> Sync for IdleNotifiedSet<T> {
+}
+
+unsafe impl<T> Send for ListEntry<T> {
+}
+
+unsafe impl<T> Sync for ListEntry<T> {
+}
+
+impl<T> IdleNotifiedSet<T> {
+ fn new() -> Self {
+ let lists = Mutex::new(ListsInner { notified: LinkedList::new(), idle: LinkedList::new(), waker: None });
+ IdleNotifiedSet { lists: Arc::new(lists), length: 0 }
+ }
+ 
+ fn len(&self) -> usize {
+ self.length
+ }
+ 
+ fn is_empty(&self) -> bool {
+ self.length == 0
+ }
+ 
+ fn insert_idle(&mut self, value: T) -> EntryInOneOfTheLists<'_, T> {
+ self.length += 1;
+ let entry = Arc::new(ListEntry { parent: self.lists.clone(), value: UnsafeCell::new(ManuallyDrop::new(value)), my_list: UnsafeCell::new(List::Idle), pointers: linked_list::Pointers::new(), _pin: PhantomPinned });
+ { let mut lock = self.lists.lock(); lock.idle.push_front(entry.clone()); }
+ EntryInOneOfTheLists { entry, set: self }
+ }
+ 
+ fn pop_notified(&mut self, waker: &Waker) -> Option<EntryInOneOfTheLists<'_, T>> {
+ if self.length == 0 { return None; }
+ let mut lock = self.lists.lock();
+ let should_update_waker = match lock.waker.as_mut() { Some(cur_waker) => ! waker.will_wake(cur_waker), None => true };
+ if should_update_waker { lock.waker = Some(waker.clone()); }
+ let entry = lock.notified.pop_back() ?;
+ lock.idle.push_front(entry.clone());
+ entry.my_list.with_mut(| ptr | unsafe { *ptr = List::Idle; });
+ drop(lock);
+ Some(EntryInOneOfTheLists { entry, set: self })
+ }
+ 
+ fn try_pop_notified(&mut self) -> Option<EntryInOneOfTheLists<'_, T>> {
+ if self.length == 0 { return None; }
+ let mut lock = self.lists.lock();
+ let entry = lock.notified.pop_back() ?;
+ lock.idle.push_front(entry.clone());
+ entry.my_list.with_mut(| ptr | unsafe { *ptr = List::Idle; });
+ drop(lock);
+ Some(EntryInOneOfTheLists { entry, set: self })
+ }
+ 
+ fn for_each(&mut self, func: F) {
+ fn get_ptrs<T>(list: &mut LinkedList<T>, ptrs: &mut Vec<*mut T>) {
+ let mut node = list.last();
+ while let Some(entry) = node { ptrs.push(entry.value.with_mut(| ptr | { let ptr: *mut ManuallyDrop<T> = ptr; let ptr: *mut T = ptr.cast(); ptr })); let prev = entry.pointers.get_prev(); node = prev.map(| prev | unsafe { &*prev.as_ptr() }); }
+ }
+ 
+ let mut ptrs = Vec::with_capacity(self.len());
+ { let mut lock = self.lists.lock(); get_ptrs(&mut lock.idle, &mut ptrs); get_ptrs(&mut lock.notified, &mut ptrs); }
+ debug_assert_eq!(ptrs.len(), ptrs.capacity());
+ for ptr in ptrs { func(unsafe { &mut * ptr }); }
+ }
+ 
+ fn drain(&mut self, func: F) {
+ if self.length == 0 { return; }
+ self.length = 0;
+ struct AllEntries<T, F: FnMut> {
+ all_entries: LinkedList<T>,
+ func: F,
+ }
+ 
+ impl<T, F: FnMut> AllEntries<T, F> {
+ fn pop_next(&mut self) -> bool {
+ if let Some(entry) = self.all_entries.pop_back() { entry.value.with_mut(| ptr | unsafe { (self.func)(ManuallyDrop::take(&mut * ptr)) }); true } else { false }
+ }
+ 
+ }
+ 
+ impl<T, F: FnMut> Drop for AllEntries<T, F> {
+ fn drop(&mut self) {
+ while self.pop_next() { }
+ }
+ 
+ }
+ 
+ let mut all_entries = AllEntries { all_entries: LinkedList::new(), func };
+ { let mut lock = self.lists.lock(); unsafe { move_to_new_list(&mut lock.idle, &mut all_entries.all_entries); move_to_new_list(&mut lock.notified, &mut all_entries.all_entries); } }
+ while all_entries.pop_next() { }
+ }
+ 
+}
+
+/// # Safety
+/// 
+/// The mutex for the entries must be held, and the target list must be such
+/// that setting `my_list` to `Neither` is ok.
+unsafe fn move_to_new_list<T>(from: &mut LinkedList<T>, to: &mut LinkedList<T>) {
+ while let Some(entry) = from.pop_back() { entry.my_list.with_mut(| ptr | { unsafe { *ptr = List::Neither; } }); to.push_front(entry); }
+}
+
+impl<a, T> EntryInOneOfTheLists<'a, T> {
+ fn remove(self) -> T {
+ self.set.length -= 1;
+ { let mut lock = self.set.lists.lock(); let old_my_list = self.entry.my_list.with_mut(| ptr | unsafe { let old_my_list = *ptr; *ptr = List::Neither; old_my_list }); let list = match old_my_list { List::Idle => &mut lock.idle, List::Notified => &mut lock.notified, List::Neither => unreachable!() }; unsafe { list.remove(ListEntry::as_raw(&self.entry)).unwrap(); } }
+ self.entry.value.with_mut(| ptr | unsafe { ManuallyDrop::take(&mut * ptr) })
+ }
+ 
+ fn with_value_and_context(&mut self, func: F) -> U {
+ let waker = waker_ref(&self.entry);
+ let mut context = Context::from_waker(&waker);
+ self.entry.value.with_mut(| ptr | unsafe { func(&mut * ptr, &mut context) })
+ }
+ 
+}
+
+impl<T> Drop for IdleNotifiedSet<T> {
+ fn drop(&mut self) {
+ self.drain(drop);
+ #[cfg(debug_assertions)] if ! std::thread::panicking() { let lock = self.lists.lock(); assert!(lock.idle.is_empty()); assert!(lock.notified.is_empty()); }
+ }
+ 
+}
+
+impl<T: static> Wake for ListEntry<T> {
+ fn wake_by_ref(me: &Arc<Self>) {
+ let mut lock = me.parent.lock();
+ let old_my_list = me.my_list.with_mut(| ptr | unsafe { let old_my_list = *ptr; if old_my_list == List::Idle { *ptr = List::Notified; } old_my_list });
+ if old_my_list == List::Idle { let me = unsafe { lock.idle.remove(ListEntry::as_raw(me)).unwrap() }; lock.notified.push_front(me); if let Some(waker) = lock.waker.take() { drop(lock); waker.wake(); } }
+ }
+ 
+ fn wake(me: Arc<Self>) {
+ Self::wake_by_ref(&me);
+ }
+ 
+}
+
+/// # Safety
+/// 
+/// `ListEntry` is forced to be !Unpin.
+unsafe impl<T> linked_list::Link for ListEntry<T> {
+ type Handle = Arc<ListEntry<T>>;
+ type Target = ListEntry<T>;
+ fn as_raw(handle: &Self::Handle) -> NonNull<ListEntry<T>> {
+ let _ = Arc::as_ptr(handle);
+ unsafe { NonNull::new_unchecked(ptr as * mut ListEntry<T>) }
+ }
+ 
+ fn from_raw(ptr: NonNull<ListEntry<T>>) -> Arc<ListEntry<T>> {
+ unsafe { Arc::from_raw(ptr.as_ptr()) }
+ }
+ 
+ fn pointers(target: NonNull<ListEntry<T>>) -> NonNull<linked_list::Pointers<ListEntry<T>>> {
+ unsafe { ListEntry::addr_of_pointers(target) }
+ }
+ 
+}
+
+#[cfg(all(test, not(loom)))]
+mod tests {
+ use crate::runtime::Builder;
+ use crate::task::JoinSet;
+ #[test]
+ fn join_set_test() {
+ let rt = Builder::new_current_thread().build().unwrap();
+ let mut set = JoinSet::new();
+ set.spawn_on(futures::future::ready(()), rt.handle());
+ rt.block_on(set.join_next()).unwrap().unwrap();
+ }
+ 
+}
+

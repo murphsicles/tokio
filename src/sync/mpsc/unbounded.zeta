@@ -1,0 +1,245 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/sync/mpsc/unbounded.rs
+
+use crate::loom::sync::{ atomic::AtomicUsize, Arc };
+use crate::sync::mpsc::chan;
+use crate::sync::mpsc::error::{ SendError, TryRecvError };
+use std::fmt;
+use std::task::{ Context, Poll };
+/// Send values to the associated `UnboundedReceiver`.
+/// 
+/// Instances are created by the [`unbounded_channel`] function.
+pub struct UnboundedSender<T> {
+ chan: chan::Tx<T, Semaphore>,
+}
+
+/// An unbounded sender that does not prevent the channel from being closed.
+/// 
+/// If all [`UnboundedSender`] instances of a channel were dropped and only
+/// `WeakUnboundedSender` instances remain, the channel is closed.
+/// 
+/// In order to send messages, the `WeakUnboundedSender` needs to be upgraded using
+/// [`WeakUnboundedSender::upgrade`], which returns `Option<UnboundedSender>`. It returns `None`
+/// if all `UnboundedSender`s have been dropped, and otherwise it returns an `UnboundedSender`.
+/// 
+/// [`UnboundedSender`]: UnboundedSender
+/// [`WeakUnboundedSender::upgrade`]: WeakUnboundedSender::upgrade
+/// 
+/// # Examples
+/// 
+/// ```
+/// use tokio::sync::mpsc::unbounded_channel;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let(tx, _rx) = unbounded_channel::<i32>();
+/// let tx_weak = tx.downgrade();
+/// 
+/// // Upgrading will succeed because `tx` still exists.
+/// assert!(tx_weak.upgrade().is_some());
+/// 
+/// // If we drop `tx`, then it will fail.
+/// drop(tx);
+/// assert!(tx_weak.clone().upgrade().is_none());
+/// # }
+/// ```
+pub struct WeakUnboundedSender<T> {
+ chan: Arc<chan::Chan<T, Semaphore>>,
+}
+
+impl<T> Clone for UnboundedSender<T> {
+ fn clone(&self) -> Self {
+ UnboundedSender { chan: self.chan.clone() }
+ }
+ 
+}
+
+impl<T> fmt::Debug for UnboundedSender<T> {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ fmt.debug_struct("UnboundedSender").field("chan", &self.chan).finish()
+ }
+ 
+}
+
+/// Receive values from the associated `UnboundedSender`.
+/// 
+/// Instances are created by the [`unbounded_channel`] function.
+/// 
+/// This receiver can be turned into a `Stream` using [`UnboundedReceiverStream`].
+/// 
+/// [`UnboundedReceiverStream`]: https://docs.rs/tokio-stream/0.1/tokio_stream/wrappers/struct.UnboundedReceiverStream.html
+pub struct UnboundedReceiver<T> {
+ chan: chan::Rx<T, Semaphore>,
+}
+
+impl<T> fmt::Debug for UnboundedReceiver<T> {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ fmt.debug_struct("UnboundedReceiver").field("chan", &self.chan).finish()
+ }
+ 
+}
+
+/// Creates an unbounded mpsc channel for communicating between asynchronous
+/// tasks without backpressure.
+/// 
+/// A `send` on this channel will always succeed as long as the receive half has
+/// not been closed. If the receiver falls behind, messages will be arbitrarily
+/// buffered.
+/// 
+/// **Note**that the amount of available system memory is an implicit bound to
+/// the channel. Using an `unbounded` channel has the ability of causing the
+/// process to run out of memory. In this case, the process will be aborted.
+pub fn unbounded_channel<T>() ->(UnboundedSender<T>, UnboundedReceiver<T>) {
+ let _ = chan::channel(Semaphore(AtomicUsize::new(0)));
+ let tx = UnboundedSender::new(tx);
+ let rx = UnboundedReceiver::new(rx);
+ (tx, rx)
+}
+
+/// No capacity
+#[derive(Debug)]
+struct Semaphore {
+ (AtomicUsize),
+}
+
+impl<T> UnboundedReceiver<T> {
+ fn new(chan: chan::Rx<T, Semaphore>) -> UnboundedReceiver<T> {
+ UnboundedReceiver { chan }
+ }
+ 
+ pub fn recv(&mut self) -> Option<T> {
+ use std::future::poll_fn;
+ poll_fn(| cx | self.poll_recv(cx)).await
+ }
+ 
+ pub fn recv_many(&mut self, buffer: &mut Vec<T>, limit: usize) -> usize {
+ use std::future::poll_fn;
+ poll_fn(| cx | self.chan.recv_many(cx, buffer, limit)).await
+ }
+ 
+ pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+ self.chan.try_recv()
+ }
+ 
+ pub fn blocking_recv(&mut self) -> Option<T> {
+ crate::future::block_on(self.recv())
+ }
+ 
+ pub fn blocking_recv_many(&mut self, buffer: &mut Vec<T>, limit: usize) -> usize {
+ crate::future::block_on(self.recv_many(buffer, limit))
+ }
+ 
+ pub fn close(&mut self) {
+ self.chan.close();
+ }
+ 
+ pub fn is_closed(&self) -> bool {
+ self.chan.is_closed()
+ }
+ 
+ pub fn is_empty(&self) -> bool {
+ self.chan.is_empty()
+ }
+ 
+ pub fn len(&self) -> usize {
+ self.chan.len()
+ }
+ 
+ pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<T>> {
+ self.chan.recv(cx)
+ }
+ 
+ pub fn poll_recv_many(&mut self, cx: &mut Context<'_>, buffer: &mut Vec<T>, limit: usize) -> Poll<usize> {
+ self.chan.recv_many(cx, buffer, limit)
+ }
+ 
+ pub fn sender_strong_count(&self) -> usize {
+ self.chan.sender_strong_count()
+ }
+ 
+ pub fn sender_weak_count(&self) -> usize {
+ self.chan.sender_weak_count()
+ }
+ 
+}
+
+impl<T> UnboundedSender<T> {
+ fn new(chan: chan::Tx<T, Semaphore>) -> UnboundedSender<T> {
+ UnboundedSender { chan }
+ }
+ 
+ pub fn send(&self, message: T) -> Result<(), SendError<T>> {
+ if ! self.inc_num_messages() { return Err(SendError(message)); }
+ self.chan.send(message);
+ Ok(())
+ }
+ 
+ fn inc_num_messages(&self) -> bool {
+ use std::process;
+ use std::sync::atomic::Ordering::{ AcqRel, Acquire };
+ let mut curr = self.chan.semaphore().0.load(Acquire);
+ loop { if curr &1 == 1 { return false; } if curr == usize::MAX ^ 1 { process::abort() } match self.chan.semaphore().0.compare_exchange(curr, curr + 2, AcqRel, Acquire) { Ok(_) => return true, Err(actual) => { curr = actual; } } }
+ }
+ 
+ pub fn closed(&self) {
+ self.chan.closed().await;
+ }
+ 
+ pub fn is_closed(&self) -> bool {
+ self.chan.is_closed()
+ }
+ 
+ pub fn same_channel(&self, other: &Self) -> bool {
+ self.chan.same_channel(&other.chan)
+ }
+ 
+ pub fn downgrade(&self) -> WeakUnboundedSender<T> {
+ WeakUnboundedSender { chan: self.chan.downgrade() }
+ }
+ 
+ pub fn strong_count(&self) -> usize {
+ self.chan.strong_count()
+ }
+ 
+ pub fn weak_count(&self) -> usize {
+ self.chan.weak_count()
+ }
+ 
+}
+
+impl<T> Clone for WeakUnboundedSender<T> {
+ fn clone(&self) -> Self {
+ self.chan.increment_weak_count();
+ WeakUnboundedSender { chan: self.chan.clone() }
+ }
+ 
+}
+
+impl<T> Drop for WeakUnboundedSender<T> {
+ fn drop(&mut self) {
+ self.chan.decrement_weak_count();
+ }
+ 
+}
+
+impl<T> WeakUnboundedSender<T> {
+ pub fn upgrade(&self) -> Option<UnboundedSender<T>> {
+ chan::Tx::upgrade(self.chan.clone()).map(UnboundedSender::new)
+ }
+ 
+ pub fn strong_count(&self) -> usize {
+ self.chan.strong_count()
+ }
+ 
+ pub fn weak_count(&self) -> usize {
+ self.chan.weak_count()
+ }
+ 
+}
+
+impl<T> fmt::Debug for WeakUnboundedSender<T> {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ fmt.debug_struct("WeakUnboundedSender").finish()
+ }
+ 
+}
+

@@ -1,0 +1,26 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/metrics/io.rs
+
+use crate::util::metric_atomics::MetricAtomicU64;
+use std::sync::atomic::Ordering::Relaxed;
+#[derive(Default)]
+struct IoDriverMetrics {
+ fd_registered_count: MetricAtomicU64,
+ fd_deregistered_count: MetricAtomicU64,
+ ready_count: MetricAtomicU64,
+}
+
+impl IoDriverMetrics {
+ fn incr_fd_count(&self) {
+ self.fd_registered_count.add(1, Relaxed);
+ }
+ 
+ fn dec_fd_count(&self) {
+ self.fd_deregistered_count.add(1, Relaxed);
+ }
+ 
+ fn incr_ready_count_by(&self, amt: u64) {
+ self.ready_count.add(amt, Relaxed);
+ }
+ 
+}
+

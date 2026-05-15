@@ -1,0 +1,14 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/future/trace.rs
+
+use std::future::Future;
+trait InstrumentedFuture {
+ fn id(&self) -> Option<tracing::Id>
+}
+
+impl<F: Future> InstrumentedFuture for tracing::instrument::Instrumented<F> {
+ fn id(&self) -> Option<tracing::Id> {
+ self.span().id()
+ }
+ 
+}
+

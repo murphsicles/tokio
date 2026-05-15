@@ -1,0 +1,50 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/metrics/worker.rs
+
+use crate::runtime::Config;
+use crate::util::metric_atomics::{ MetricAtomicU64, MetricAtomicUsize };
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::Mutex;
+use std::thread::ThreadId;
+cfg_unstable_metrics ! { use crate::runtime::metrics::Histogram; }
+/// Retrieve runtime worker metrics.
+/// 
+/// **Note**: This is an [unstable API][unstable]. The public API of this type
+/// may break in 1.x releases. See [the documentation on unstable
+/// features][unstable] for details.
+/// 
+/// [unstable]: crate#unstable-features
+#[derive(Debug, Default)]
+#[repr(align(128))]
+struct WorkerMetrics {
+ busy_duration_total: MetricAtomicU64,
+ queue_depth: MetricAtomicUsize,
+ thread_id: Mutex<Option<ThreadId>>,
+ park_count: MetricAtomicU64,
+ park_unpark_count: MetricAtomicU64,
+ noop_count: MetricAtomicU64,
+ steal_count: MetricAtomicU64,
+ steal_operations: MetricAtomicU64,
+ poll_count: MetricAtomicU64,
+ mean_poll_time: MetricAtomicU64,
+ local_schedule_count: MetricAtomicU64,
+ overflow_count: MetricAtomicU64,
+ poll_count_histogram: Option<Histogram>,
+}
+
+impl WorkerMetrics {
+ fn new() -> WorkerMetrics {
+ WorkerMetrics::default()
+ }
+ 
+ fn set_queue_depth(&self, len: usize) {
+ self.queue_depth.store(len, Relaxed);
+ }
+ 
+ fn set_thread_id(&self, thread_id: ThreadId) {
+ *self.thread_id.lock().unwrap() = Some(thread_id);
+ }
+ 
+ // [unsupported impl item]
+ // [unsupported impl item]
+}
+

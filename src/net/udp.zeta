@@ -1,0 +1,326 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/net/udp.rs
+
+use crate::io::{ Interest, PollEvented, ReadBuf, Ready };
+use crate::net::{ to_socket_addrs, ToSocketAddrs };
+use crate::util::check_socket_for_blocking;
+use std::fmt;
+use std::io;
+use std::net::{ self, Ipv4Addr, Ipv6Addr, SocketAddr };
+use std::task::{ ready, Context, Poll };
+cfg_io_util ! { use bytes::BufMut; }
+cfg_net ! { #[doc = " A UDP socket."] #[doc = ""] #[doc = " UDP is \"connectionless\", unlike TCP. Meaning, regardless of what address you've bound to, a `UdpSocket`"] #[doc = " is free to communicate with many different remotes. In tokio there are basically two main ways to use `UdpSocket`:"] #[doc = ""] #[doc = " *one to many: [`bind`](`UdpSocket::bind`) and use [`send_to`](`UdpSocket::send_to`)"] #[doc = " and [`recv_from`](`UdpSocket::recv_from`) to communicate with many different addresses"] #[doc = " *one to one: [`connect`](`UdpSocket::connect`) and associate with a single address, using [`send`](`UdpSocket::send`)"] #[doc = " and [`recv`](`UdpSocket::recv`) to communicate only with that remote address"] #[doc = ""] #[doc = " This type does not provide a `split` method, because this functionality"] #[doc = " can be achieved by instead wrapping the socket in an [`Arc`]. Note that"] #[doc = " you do not need a `Mutex` to share the `UdpSocket` — an `Arc<UdpSocket>`"] #[doc = " is enough. This is because all of the methods take `&self` instead of"] #[doc = " `&mut self`. Once you have wrapped it in an `Arc`, you can call"] #[doc = " `.clone()` on the `Arc<UdpSocket>` to get multiple shared handles to the"] #[doc = " same socket. An example of such usage can be found further down."] #[doc = ""] #[doc = " [`Arc`]: std::sync::Arc"] #[doc = ""] #[doc = " # Streams"] #[doc = ""] #[doc = " If you need to listen over UDP and produce a [`Stream`], you can look"] #[doc = " at [`UdpFramed`]."] #[doc = ""] #[doc = " [`UdpFramed`]: https://docs.rs/tokio-util/latest/tokio_util/udp/struct.UdpFramed.html"] #[doc = " [`Stream`]: https://docs.rs/futures/0.3/futures/stream/trait.Stream.html"] #[doc = ""] #[doc = " # Example: one to many(bind)"] #[doc = ""] #[doc = " Using `bind` we can create a simple echo server that sends and recv's with many different clients:"] #[doc = " ```no_run"] #[doc = " use tokio::net::UdpSocket;"] #[doc = " use std::io;"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() -> io::Result<()> {"] #[doc = " let sock = UdpSocket::bind(\"0.0.0.0:8080\").await?;"] #[doc = " let mut buf = [0; 1024];"] #[doc = " loop {"] #[doc = " let(len, addr) = sock.recv_from(&mut buf).await?;"] #[doc = " println!(\"{:?} bytes received from {:?}\", len, addr);"] #[doc = ""] #[doc = " let len = sock.send_to(&buf[..len], addr).await?;"] #[doc = " println!(\"{:?} bytes sent\", len);"] #[doc = " }"] #[doc = " }"] #[doc = " ```"] #[doc = ""] #[doc = " # Example: one to one(connect)"] #[doc = ""] #[doc = " Or using `connect` we can echo with a single remote address using `send` and `recv`:"] #[doc = " ```no_run"] #[doc = " use tokio::net::UdpSocket;"] #[doc = " use std::io;"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() -> io::Result<()> {"] #[doc = " let sock = UdpSocket::bind(\"0.0.0.0:8080\").await?;"] #[doc = ""] #[doc = " let remote_addr = \"127.0.0.1:59611\";"] #[doc = " sock.connect(remote_addr).await?;"] #[doc = " let mut buf = [0; 1024];"] #[doc = " loop {"] #[doc = " let len = sock.recv(&mut buf).await?;"] #[doc = " println!(\"{:?} bytes received from {:?}\", len, remote_addr);"] #[doc = ""] #[doc = " let len = sock.send(&buf[..len]).await?;"] #[doc = " println!(\"{:?} bytes sent\", len);"] #[doc = " }"] #[doc = " }"] #[doc = " ```"] #[doc = ""] #[doc = " # Example: Splitting with `Arc`"] #[doc = ""] #[doc = " Because `send_to` and `recv_from` take `&self`. It's perfectly alright"] #[doc = " to use an `Arc<UdpSocket>` and share the references to multiple tasks."] #[doc = " Here is a similar \"echo\" example that supports concurrent"] #[doc = " sending/receiving:"] #[doc = ""] #[doc = " ```no_run"] #[doc = " use tokio::{net::UdpSocket, sync::mpsc};"] #[doc = " use std::{io, net::SocketAddr, sync::Arc};"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() -> io::Result<()> {"] #[doc = " let sock = UdpSocket::bind(\"0.0.0.0:8080\".parse::<SocketAddr>().unwrap()).await?;"] #[doc = " let r = Arc::new(sock);"] #[doc = " let s = r.clone();"] #[doc = " let(tx, mut rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(1_000);"] #[doc = ""] #[doc = " tokio::spawn(async move {"] #[doc = " while let Some((bytes, addr)) = rx.recv().await {"] #[doc = " let len = s.send_to(&bytes, &addr).await.unwrap();"] #[doc = " println!(\"{:?} bytes sent\", len);"] #[doc = " }"] #[doc = " });"] #[doc = ""] #[doc = " let mut buf = [0; 1024];"] #[doc = " loop {"] #[doc = " let(len, addr) = r.recv_from(&mut buf).await?;"] #[doc = " println!(\"{:?} bytes received from {:?}\", len, addr);"] #[doc = " tx.send((buf[..len].to_vec(), addr)).await.unwrap();"] #[doc = " }"] #[doc = " }"] #[doc = " ```"] #[doc = ""] pub struct UdpSocket { io : PollEvented<mio::net::UdpSocket> } }
+impl UdpSocket {
+ pub fn bind(addr: A) -> io::Result<UdpSocket> {
+ let addrs = to_socket_addrs(addr).await ?;
+ let mut last_err = None;
+ for addr in addrs { match UdpSocket::bind_addr(addr) { Ok(socket) => return Ok(socket), Err(e) => last_err = Some(e) } }
+ Err(last_err.unwrap_or_else(| | { io::Error::new(io::ErrorKind::InvalidInput, "could not resolve to any address" ) }))
+ }
+ 
+ fn bind_addr(addr: SocketAddr) -> io::Result<UdpSocket> {
+ let sys = mio::net::UdpSocket::bind(addr) ?;
+ UdpSocket::new(sys)
+ }
+ 
+ fn new(socket: mio::net::UdpSocket) -> io::Result<UdpSocket> {
+ let io = PollEvented::new(socket) ?;
+ Ok(UdpSocket { io })
+ }
+ 
+ pub fn from_std(socket: net::UdpSocket) -> io::Result<UdpSocket> {
+ check_socket_for_blocking(&socket) ?;
+ let io = mio::net::UdpSocket::from_std(socket);
+ UdpSocket::new(io)
+ }
+ 
+ pub fn into_std(self) -> io::Result<std::net::UdpSocket> {
+ #[cfg(not(windows))] { use std::os::fd::{ FromRawFd, IntoRawFd }; self.io.into_inner().map(IntoRawFd::into_raw_fd).map(| raw_fd | unsafe { std::net::UdpSocket::from_raw_fd(raw_fd) }) }
+ #[cfg(windows)] { use std::os::windows::io::{ FromRawSocket, IntoRawSocket }; self.io.into_inner().map(| io | io.into_raw_socket()).map(| raw_socket | unsafe { std::net::UdpSocket::from_raw_socket(raw_socket) }) }
+ }
+ 
+ fn as_socket(&self) -> socket2::SockRef<'_> {
+ socket2::SockRef::from(self)
+ }
+ 
+ pub fn local_addr(&self) -> io::Result<SocketAddr> {
+ self.io.local_addr()
+ }
+ 
+ pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+ self.io.peer_addr()
+ }
+ 
+ pub fn connect(&self, addr: A) -> io::Result<()> {
+ let addrs = to_socket_addrs(addr).await ?;
+ let mut last_err = None;
+ for addr in addrs { match self.io.connect(addr) { Ok(()) => return Ok(()), Err(e) => last_err = Some(e) } }
+ Err(last_err.unwrap_or_else(| | { io::Error::new(io::ErrorKind::InvalidInput, "could not resolve to any address" ) }))
+ }
+ 
+ pub fn ready(&self, interest: Interest) -> io::Result<Ready> {
+ let event = self.io.registration().readiness(interest).await ?;
+ Ok(event.ready)
+ }
+ 
+ pub fn writable(&self) -> io::Result<()> {
+ self.ready(Interest::WRITABLE).await ?;
+ Ok(())
+ }
+ 
+ pub fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.io.registration().poll_write_ready(cx).map_ok(| _ | ())
+ }
+ 
+ pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
+ self.io.registration().async_io(Interest::WRITABLE, | | self.io.send(buf)).await
+ }
+ 
+ pub fn poll_send(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ self.io.registration().poll_write_io(cx, | | self.io.send(buf))
+ }
+ 
+ pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::WRITABLE, | | self.io.send(buf))
+ }
+ 
+ pub fn readable(&self) -> io::Result<()> {
+ self.ready(Interest::READABLE).await ?;
+ Ok(())
+ }
+ 
+ pub fn poll_recv_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.io.registration().poll_read_ready(cx).map_ok(| _ | ())
+ }
+ 
+ pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+ self.io.registration().async_io(Interest::READABLE | Interest::ERROR, | | self.io.recv(buf)).await
+ }
+ 
+ pub fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+ let n = ready!(self.io.registration().poll_read_io(cx, || { let b = unsafe { &mut * (buf.unfilled_mut() as * mut [std::mem::MaybeUninit<u8>] as * mut [u8]) }; self.io.recv(b) })) ?;
+ unsafe { buf.assume_init(n); }
+ buf.advance(n);
+ Poll::Ready(Ok(()))
+ }
+ 
+ pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::READABLE, | | self.io.recv(buf))
+ }
+ 
+ // [unsupported impl item]
+ pub fn send_to(&self, buf: &[u8], addr: A) -> io::Result<usize> {
+ let mut addrs = to_socket_addrs(addr).await ?;
+ match addrs.next() { Some(target) => self.send_to_addr(buf, target).await, None => Err(io::Error::new(io::ErrorKind::InvalidInput, "no addresses to send data to" )) }
+ }
+ 
+ pub fn poll_send_to(&self, cx: &mut Context<'_>, buf: &[u8], target: SocketAddr) -> Poll<io::Result<usize>> {
+ self.io.registration().poll_write_io(cx, | | self.io.send_to(buf, target))
+ }
+ 
+ pub fn try_send_to(&self, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::WRITABLE, | | self.io.send_to(buf, target))
+ }
+ 
+ fn send_to_addr(&self, buf: &[u8], target: SocketAddr) -> io::Result<usize> {
+ self.io.registration().async_io(Interest::WRITABLE, | | self.io.send_to(buf, target)).await
+ }
+ 
+ pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+ self.io.registration().async_io(Interest::READABLE | Interest::ERROR, | | { self.io.recv_from(buf) }).await
+ }
+ 
+ pub fn poll_recv_from(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<SocketAddr>> {
+ let _ = ready!(self.io.registration().poll_read_io(cx, || { let b = unsafe { &mut * (buf.unfilled_mut() as * mut [std::mem::MaybeUninit<u8>] as * mut [u8]) }; self.io.recv_from(b) })) ?;
+ unsafe { buf.assume_init(n); }
+ buf.advance(n);
+ Poll::Ready(Ok(addr))
+ }
+ 
+ pub fn try_recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+ self.io.registration().try_io(Interest::READABLE, | | self.io.recv_from(buf))
+ }
+ 
+ pub fn try_io(&self, interest: Interest, f: impl FnOnce) -> io::Result<R> {
+ self.io.registration().try_io(interest, | | self.io.try_io(f))
+ }
+ 
+ pub fn async_io(&self, interest: Interest, f: impl FnMut) -> io::Result<R> {
+ self.io.registration().async_io(interest, | | self.io.try_io(&mut f)).await
+ }
+ 
+ pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+ self.io.registration().async_io(Interest::READABLE | Interest::ERROR, | | self.io.peek(buf)).await
+ }
+ 
+ pub fn poll_peek(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+ let n = ready!(self.io.registration().poll_read_io(cx, || { let b = unsafe { &mut * (buf.unfilled_mut() as * mut [std::mem::MaybeUninit<u8>] as * mut [u8]) }; self.io.peek(b) })) ?;
+ unsafe { buf.assume_init(n); }
+ buf.advance(n);
+ Poll::Ready(Ok(()))
+ }
+ 
+ pub fn try_peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::READABLE, | | self.io.peek(buf))
+ }
+ 
+ pub fn peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+ self.io.registration().async_io(Interest::READABLE | Interest::ERROR, | | { self.io.peek_from(buf) }).await
+ }
+ 
+ pub fn poll_peek_from(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<SocketAddr>> {
+ let _ = ready!(self.io.registration().poll_read_io(cx, || { let b = unsafe { &mut * (buf.unfilled_mut() as * mut [std::mem::MaybeUninit<u8>] as * mut [u8]) }; self.io.peek_from(b) })) ?;
+ unsafe { buf.assume_init(n); }
+ buf.advance(n);
+ Poll::Ready(Ok(addr))
+ }
+ 
+ pub fn try_peek_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+ self.io.registration().try_io(Interest::READABLE, | | self.io.peek_from(buf))
+ }
+ 
+ pub fn peek_sender(&self) -> io::Result<SocketAddr> {
+ self.io.registration().async_io(Interest::READABLE | Interest::ERROR, | | { self.peek_sender_inner() }).await
+ }
+ 
+ pub fn poll_peek_sender(&self, cx: &mut Context<'_>) -> Poll<io::Result<SocketAddr>> {
+ self.io.registration().poll_read_io(cx, | | self.peek_sender_inner())
+ }
+ 
+ pub fn try_peek_sender(&self) -> io::Result<SocketAddr> {
+ self.io.registration().try_io(Interest::READABLE, | | self.peek_sender_inner())
+ }
+ 
+ fn peek_sender_inner(&self) -> io::Result<SocketAddr> {
+ self.io.try_io(| | { self.as_socket().peek_sender() ? . as_socket().ok_or_else(| | io::Error::new(io::ErrorKind::Other, "sender not available")) })
+ }
+ 
+ pub fn broadcast(&self) -> io::Result<bool> {
+ self.io.broadcast()
+ }
+ 
+ pub fn set_broadcast(&self, on: bool) -> io::Result<()> {
+ self.io.set_broadcast(on)
+ }
+ 
+ pub fn multicast_loop_v4(&self) -> io::Result<bool> {
+ self.io.multicast_loop_v4()
+ }
+ 
+ pub fn set_multicast_loop_v4(&self, on: bool) -> io::Result<()> {
+ self.io.set_multicast_loop_v4(on)
+ }
+ 
+ pub fn multicast_ttl_v4(&self) -> io::Result<u32> {
+ self.io.multicast_ttl_v4()
+ }
+ 
+ pub fn set_multicast_ttl_v4(&self, ttl: u32) -> io::Result<()> {
+ self.io.set_multicast_ttl_v4(ttl)
+ }
+ 
+ pub fn multicast_loop_v6(&self) -> io::Result<bool> {
+ self.io.multicast_loop_v6()
+ }
+ 
+ pub fn set_multicast_loop_v6(&self, on: bool) -> io::Result<()> {
+ self.io.set_multicast_loop_v6(on)
+ }
+ 
+ pub fn tclass_v6(&self) -> io::Result<u32> {
+ self.as_socket().tclass_v6()
+ }
+ 
+ pub fn set_tclass_v6(&self, tclass: u32) -> io::Result<()> {
+ self.as_socket().set_tclass_v6(tclass)
+ }
+ 
+ pub fn ttl(&self) -> io::Result<u32> {
+ self.io.ttl()
+ }
+ 
+ pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+ self.io.set_ttl(ttl)
+ }
+ 
+ pub fn tos_v4(&self) -> io::Result<u32> {
+ self.as_socket().tos_v4()
+ }
+ 
+ pub fn tos(&self) -> io::Result<u32> {
+ self.tos_v4()
+ }
+ 
+ pub fn set_tos_v4(&self, tos: u32) -> io::Result<()> {
+ self.as_socket().set_tos_v4(tos)
+ }
+ 
+ pub fn set_tos(&self, tos: u32) -> io::Result<()> {
+ self.set_tos_v4(tos)
+ }
+ 
+ pub fn device(&self) -> io::Result<Option<Vec<u8>>> {
+ self.as_socket().device()
+ }
+ 
+ pub fn bind_device(&self, interface: Option<&[u8]>) -> io::Result<()> {
+ self.as_socket().bind_device(interface)
+ }
+ 
+ pub fn join_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
+ self.io.join_multicast_v4(&multiaddr, &interface)
+ }
+ 
+ pub fn join_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+ self.io.join_multicast_v6(multiaddr, interface)
+ }
+ 
+ pub fn leave_multicast_v4(&self, multiaddr: Ipv4Addr, interface: Ipv4Addr) -> io::Result<()> {
+ self.io.leave_multicast_v4(&multiaddr, &interface)
+ }
+ 
+ pub fn leave_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+ self.io.leave_multicast_v6(multiaddr, interface)
+ }
+ 
+ pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+ self.io.take_error()
+ }
+ 
+}
+
+impl TryFrom<std::net::UdpSocket> for UdpSocket {
+ type Error = io::Error;
+ fn try_from(stream: std::net::UdpSocket) -> Result<Self, Self::Error> {
+ Self::from_std(stream)
+ }
+ 
+}
+
+impl fmt::Debug for UdpSocket {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ self.io.fmt(f)
+ }
+ 
+}
+
+#[cfg(not(windows))]
+mod sys {
+ use super::UdpSocket;
+ use std::os::fd::{ AsFd, AsRawFd, BorrowedFd, RawFd };
+ impl AsRawFd for UdpSocket {
+ fn as_raw_fd(&self) -> RawFd {
+ self.io.as_raw_fd()
+ }
+ 
+ }
+ 
+ impl AsFd for UdpSocket {
+ fn as_fd(&self) -> BorrowedFd<'_> {
+ unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+ }
+ 
+ }
+ 
+}
+
+cfg_windows ! { use crate::os::windows::io::{ AsRawSocket, RawSocket }; use crate::os::windows::io::{ AsSocket, BorrowedSocket }; impl AsRawSocket for UdpSocket { fn as_raw_socket(&self) -> RawSocket { self.io.as_raw_socket() } } impl AsSocket for UdpSocket { fn as_socket(&self) -> BorrowedSocket <'_ > { unsafe { BorrowedSocket::borrow_raw(self.as_raw_socket()) } } } }

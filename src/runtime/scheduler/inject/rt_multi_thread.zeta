@@ -1,0 +1,43 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/inject/rt_multi_thread.rs
+
+use super::{ Shared, Synced };
+use crate::runtime::scheduler::Lock;
+use crate::runtime::task;
+use std::sync::atomic::Ordering::Release;
+impl<a> Lock<Synced> for &mut Synced {
+ type Handle = &mut Synced;
+ fn lock(self) -> Self::Handle {
+ self
+ }
+ 
+}
+
+impl AsMut<Synced> for Synced {
+ fn as_mut(&mut self) -> &mut Synced {
+ self
+ }
+ 
+}
+
+impl<T: static> Shared<T> {
+ fn push_batch(&self, shared: L, iter: I) {
+ let first = match iter.next() { Some(first) => first.into_raw(), None => return };
+ let mut prev = first;
+ let mut counter = 1;
+ iter.for_each(| next | { let next = next.into_raw(); unsafe { prev.set_queue_next(Some(next)) }; prev = next; counter += 1; });
+ unsafe { self.push_batch_inner(shared, first, prev, counter); }
+ }
+ 
+ fn push_batch_inner(&self, shared: L, batch_head: task::RawTask, batch_tail: task::RawTask, num: usize) {
+ debug_assert!(unsafe { batch_tail.get_queue_next().is_none() });
+ let mut synced = shared.lock();
+ if synced.as_mut().is_closed { drop(synced); let mut curr = Some(batch_head); while let Some(task) = curr { curr = unsafe { task.get_queue_next() }; let _ = unsafe { task::Notified::<T>::from_raw(task) }; } return; }
+ let synced = synced.as_mut();
+ if let Some(tail) = synced.tail { unsafe { tail.set_queue_next(Some(batch_head)); } } else { synced.head = Some(batch_head); }
+ synced.tail = Some(batch_tail);
+ let len = unsafe { self.len.unsync_load() };
+ self.len.store(len + num, Release);
+ }
+ 
+}
+

@@ -1,0 +1,44 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/io/util/split.rs
+
+use crate::io::util::read_until::read_until_internal;
+use crate::io::AsyncBufRead;
+use pin_project_lite::pin_project;
+use std::io;
+use std::mem;
+use std::pin::Pin;
+use std::task::{ ready, Context, Poll };
+pin_project ! { #[doc = " Splitter for the [`split`](crate::io::AsyncBufReadExt::split) method."] #[doc = ""] #[doc = " A `Split` can be turned into a `Stream` with [`SplitStream`]."] #[doc = ""] #[doc = " [`SplitStream`]: https://docs.rs/tokio-stream/0.1/tokio_stream/wrappers/struct.SplitStream.html"] #[derive(Debug)] #[must_use = "streams do nothing unless polled"] #[cfg_attr(docsrs, doc(cfg(feature = "io-util")))] pub struct Split<R> { #[pin] reader : R, buf : Vec<u8>, delim : u8, read : usize } }
+fn split<R>(reader: R, delim: u8) -> Split<R> where R: AsyncBufRead {
+ Split { reader, buf: Vec::new(), delim, read: 0 }
+}
+
+impl<R> Split<R> where R: AsyncBufRead + Unpin {
+ pub fn next_segment(&mut self) -> io::Result<Option<Vec<u8>>> {
+ use std::future::poll_fn;
+ poll_fn(| cx | Pin::new(&mut * self).poll_next_segment(cx)).await
+ }
+ 
+}
+
+impl<R> Split<R> where R: AsyncBufRead {
+ pub fn poll_next_segment(self, cx: &mut Context<'_>) -> Poll<io::Result<Option<Vec<u8>>>> {
+ let me = self.project();
+ let n = ready!(read_until_internal(me.reader, cx, *me.delim, me.buf, me.read )) ?;
+ debug_assert_eq!(*me.read, 0);
+ if n == 0 &&me.buf.is_empty() { return Poll::Ready(Ok(None)); }
+ if me.buf.last() == Some(me.delim) { me.buf.pop(); }
+ Poll::Ready(Ok(Some(mem::take(me.buf))))
+ }
+ 
+}
+
+#[cfg(test)]
+mod tests {
+ use super::*;
+ #[test]
+ fn assert_unpin() {
+ crate::is_unpin::<Split<()> >();
+ }
+ 
+}
+

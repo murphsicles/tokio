@@ -1,0 +1,193 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/net/unix/datagram/socket.rs
+
+use crate::io::{ Interest, PollEvented, ReadBuf, Ready };
+use crate::net::unix::SocketAddr;
+use crate::util::check_socket_for_blocking;
+use std::fmt;
+use std::io;
+use std::net::Shutdown;
+use std::os::unix::io::{ AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd };
+use std::os::unix::net;
+use std::path::Path;
+use std::task::{ ready, Context, Poll };
+cfg_io_util ! { use bytes::BufMut; }
+cfg_net_unix ! { #[doc = " An I/O object representing a Unix datagram socket."] #[doc = ""] #[doc = " A socket can be either named(associated with a filesystem path) or"] #[doc = " unnamed."] #[doc = ""] #[doc = " This type does not provide a `split` method, because this functionality"] #[doc = " can be achieved by wrapping the socket in an [`Arc`]. Note that you do"] #[doc = " not need a `Mutex` to share the `UnixDatagram` — an `Arc<UnixDatagram>`"] #[doc = " is enough. This is because all of the methods take `&self` instead of"] #[doc = " `&mut self`."] #[doc = ""] #[doc = " **Note:**named sockets are persisted even after the object is dropped"] #[doc = " and the program has exited, and cannot be reconnected. It is advised"] #[doc = " that you either check for and unlink the existing socket if it exists,"] #[doc = " or use a temporary file that is guaranteed to not already exist."] #[doc = ""] #[doc = " [`Arc`]: std::sync::Arc"] #[doc = ""] #[doc = " # Examples"] #[doc = " Using named sockets, associated with a filesystem path:"] #[doc = " ```"] #[doc = " # use std::error::Error;"] #[doc = " # #[tokio::main]"] #[doc = " # async fn main() -> Result<(), Box<dyn Error>> {"] #[doc = " # if cfg!(miri) { return Ok(()); } // No `socket` in miri."] #[doc = " use tokio::net::UnixDatagram;"] #[doc = " use tempfile::tempdir;"] #[doc = ""] #[doc = " // We use a temporary directory so that the socket"] #[doc = " // files left by the bound sockets will get cleaned up."] #[doc = " let tmp = tempdir()?;"] #[doc = ""] #[doc = " // Bind each socket to a filesystem path"] #[doc = " let tx_path = tmp.path().join(\"tx\");"] #[doc = " let tx = UnixDatagram::bind(&tx_path)?;"] #[doc = " let rx_path = tmp.path().join(\"rx\");"] #[doc = " let rx = UnixDatagram::bind(&rx_path)?;"] #[doc = ""] #[doc = " let bytes = b\"hello world\";"] #[doc = " tx.send_to(bytes, &rx_path).await?;"] #[doc = ""] #[doc = " let mut buf = vec![0u8; 24];"] #[doc = " let(size, addr) = rx.recv_from(&mut buf).await?;"] #[doc = ""] #[doc = " let dgram = &buf[..size];"] #[doc = " assert_eq!(dgram, bytes);"] #[doc = " assert_eq!(addr.as_pathname().unwrap(), &tx_path);"] #[doc = ""] #[doc = " # Ok(())"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " Using unnamed sockets, created as a pair"] #[doc = " ```"] #[doc = " # use std::error::Error;"] #[doc = " # #[tokio::main]"] #[doc = " # async fn main() -> Result<(), Box<dyn Error>> {"] #[doc = " # if cfg!(miri) { return Ok(()); } // No SOCK_DGRAM for `socketpair` in miri."] #[doc = " use tokio::net::UnixDatagram;"] #[doc = ""] #[doc = " // Create the pair of sockets"] #[doc = " let(sock1, sock2) = UnixDatagram::pair()?;"] #[doc = ""] #[doc = " // Since the sockets are paired, the paired send/recv"] #[doc = " // functions can be used"] #[doc = " let bytes = b\"hello world\";"] #[doc = " sock1.send(bytes).await?;"] #[doc = ""] #[doc = " let mut buff = vec![0u8; 24];"] #[doc = " let size = sock2.recv(&mut buff).await?;"] #[doc = ""] #[doc = " let dgram = &buff[..size];"] #[doc = " assert_eq!(dgram, bytes);"] #[doc = ""] #[doc = " # Ok(())"] #[doc = " # }"] #[doc = " ```"] #[cfg_attr(docsrs, doc(alias = "uds"))] pub struct UnixDatagram { io: PollEvented<mio::net::UnixDatagram> } }
+impl UnixDatagram {
+ fn from_mio(sys: mio::net::UnixDatagram) -> io::Result<UnixDatagram> {
+ let datagram = UnixDatagram::new(sys) ?;
+ if let Some(e) = datagram.io.take_error() ? { return Err(e); }
+ Ok(datagram)
+ }
+ 
+ pub fn ready(&self, interest: Interest) -> io::Result<Ready> {
+ let event = self.io.registration().readiness(interest).await ?;
+ Ok(event.ready)
+ }
+ 
+ pub fn writable(&self) -> io::Result<()> {
+ self.ready(Interest::WRITABLE).await ?;
+ Ok(())
+ }
+ 
+ pub fn poll_send_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.io.registration().poll_write_ready(cx).map_ok(| _ | ())
+ }
+ 
+ pub fn readable(&self) -> io::Result<()> {
+ self.ready(Interest::READABLE).await ?;
+ Ok(())
+ }
+ 
+ pub fn poll_recv_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.io.registration().poll_read_ready(cx).map_ok(| _ | ())
+ }
+ 
+ pub fn bind(path: P) -> io::Result<UnixDatagram> {
+ let socket = mio::net::UnixDatagram::bind(path) ?;
+ UnixDatagram::new(socket)
+ }
+ 
+ pub fn pair() -> io::Result<(UnixDatagram, UnixDatagram)> {
+ let _ = mio::net::UnixDatagram::pair() ?;
+ let a = UnixDatagram::new(a) ?;
+ let b = UnixDatagram::new(b) ?;
+ Ok((a, b))
+ }
+ 
+ pub fn from_std(datagram: net::UnixDatagram) -> io::Result<UnixDatagram> {
+ check_socket_for_blocking(&datagram) ?;
+ let socket = mio::net::UnixDatagram::from_std(datagram);
+ let io = PollEvented::new(socket) ?;
+ Ok(UnixDatagram { io })
+ }
+ 
+ pub fn into_std(self) -> io::Result<std::os::unix::net::UnixDatagram> {
+ self.io.into_inner().map(IntoRawFd::into_raw_fd).map(| raw_fd | unsafe { std::os::unix::net::UnixDatagram::from_raw_fd(raw_fd) })
+ }
+ 
+ fn new(socket: mio::net::UnixDatagram) -> io::Result<UnixDatagram> {
+ let io = PollEvented::new(socket) ?;
+ Ok(UnixDatagram { io })
+ }
+ 
+ pub fn unbound() -> io::Result<UnixDatagram> {
+ let socket = mio::net::UnixDatagram::unbound() ?;
+ UnixDatagram::new(socket)
+ }
+ 
+ pub fn connect(&self, path: P) -> io::Result<()> {
+ self.io.connect(path)
+ }
+ 
+ pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
+ self.io.registration().async_io(Interest::WRITABLE, | | self.io.send(buf)).await
+ }
+ 
+ pub fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::WRITABLE, | | self.io.send(buf))
+ }
+ 
+ pub fn try_send_to(&self, buf: &[u8], target: P) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::WRITABLE, | | self.io.send_to(buf, target))
+ }
+ 
+ pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+ self.io.registration().async_io(Interest::READABLE, | | self.io.recv(buf)).await
+ }
+ 
+ pub fn try_recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::READABLE, | | self.io.recv(buf))
+ }
+ 
+ // [unsupported impl item]
+ pub fn send_to(&self, buf: &[u8], target: P) -> io::Result<usize> {
+ self.io.registration().async_io(Interest::WRITABLE, | | self.io.send_to(buf, target.as_ref())).await
+ }
+ 
+ pub fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+ let _ = self.io.registration().async_io(Interest::READABLE, | | self.io.recv_from(buf)).await ?;
+ Ok((n, SocketAddr(addr)))
+ }
+ 
+ pub fn poll_recv_from(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<SocketAddr>> {
+ let _ = ready!(self.io.registration().poll_read_io(cx, || { let b = unsafe { &mut * (buf.unfilled_mut() as * mut [std::mem::MaybeUninit<u8>] as * mut [u8]) }; self.io.recv_from(b) })) ?;
+ unsafe { buf.assume_init(n); }
+ buf.advance(n);
+ Poll::Ready(Ok(SocketAddr(addr)))
+ }
+ 
+ pub fn poll_send_to(&self, cx: &mut Context<'_>, buf: &[u8], target: P) -> Poll<io::Result<usize>> {
+ self.io.registration().poll_write_io(cx, | | self.io.send_to(buf, target.as_ref()))
+ }
+ 
+ pub fn poll_send(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ self.io.registration().poll_write_io(cx, | | self.io.send(buf))
+ }
+ 
+ pub fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+ let n = ready!(self.io.registration().poll_read_io(cx, || { let b = unsafe { &mut * (buf.unfilled_mut() as * mut [std::mem::MaybeUninit<u8>] as * mut [u8]) }; self.io.recv(b) })) ?;
+ unsafe { buf.assume_init(n); }
+ buf.advance(n);
+ Poll::Ready(Ok(()))
+ }
+ 
+ pub fn try_recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+ let _ = self.io.registration().try_io(Interest::READABLE, | | self.io.recv_from(buf)) ?;
+ Ok((n, SocketAddr(addr)))
+ }
+ 
+ pub fn try_io(&self, interest: Interest, f: impl FnOnce) -> io::Result<R> {
+ self.io.registration().try_io(interest, | | self.io.try_io(f))
+ }
+ 
+ pub fn async_io(&self, interest: Interest, f: impl FnMut) -> io::Result<R> {
+ self.io.registration().async_io(interest, | | self.io.try_io(&mut f)).await
+ }
+ 
+ pub fn local_addr(&self) -> io::Result<SocketAddr> {
+ self.io.local_addr().map(SocketAddr)
+ }
+ 
+ pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+ self.io.peer_addr().map(SocketAddr)
+ }
+ 
+ pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+ self.io.take_error()
+ }
+ 
+ pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
+ self.io.shutdown(how)
+ }
+ 
+}
+
+impl TryFrom<std::os::unix::net::UnixDatagram> for UnixDatagram {
+ type Error = io::Error;
+ fn try_from(stream: std::os::unix::net::UnixDatagram) -> Result<Self, Self::Error> {
+ Self::from_std(stream)
+ }
+ 
+}
+
+impl fmt::Debug for UnixDatagram {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ (*self.io).fmt(f)
+ }
+ 
+}
+
+impl AsRawFd for UnixDatagram {
+ fn as_raw_fd(&self) -> RawFd {
+ self.io.as_raw_fd()
+ }
+ 
+}
+
+impl AsFd for UnixDatagram {
+ fn as_fd(&self) -> BorrowedFd<'_> {
+ unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+ }
+ 
+}
+

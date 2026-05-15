@@ -1,0 +1,11 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/util/markers.rs
+
+/// Marker for types that are `Sync` but not `Send`
+struct SyncNotSend {
+ (*mut()),
+}
+
+unsafe impl Sync for SyncNotSend {
+}
+
+cfg_rt ! { pub(crate) struct NotSendOrSync(#[allow(dead_code)] * mut()); }

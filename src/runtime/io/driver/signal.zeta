@@ -1,0 +1,21 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/io/driver/signal.rs
+
+use super::{ Driver, Handle, TOKEN_SIGNAL };
+use std::io;
+impl Handle {
+ fn register_signal_receiver(&self, receiver: &mut mio::net::UnixStream) -> io::Result<()> {
+ self.registry.register(receiver, TOKEN_SIGNAL, mio::Interest::READABLE) ?;
+ Ok(())
+ }
+ 
+}
+
+impl Driver {
+ fn consume_signal_ready(&mut self) -> bool {
+ let ret = self.signal_ready;
+ self.signal_ready = false;
+ ret
+ }
+ 
+}
+

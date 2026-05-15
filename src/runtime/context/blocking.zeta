@@ -1,0 +1,60 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/context/blocking.rs
+
+use super::{ EnterRuntime, CONTEXT };
+use crate::loom::thread::AccessError;
+use crate::util::markers::NotSendOrSync;
+use std::marker::PhantomData;
+use std::time::Duration;
+/// Guard tracking that a caller has entered a blocking region.
+#[must_use]
+struct BlockingRegionGuard {
+ _p: PhantomData<NotSendOrSync>,
+}
+
+struct DisallowBlockInPlaceGuard {
+ (bool),
+}
+
+fn try_enter_blocking_region() -> Option<BlockingRegionGuard> {
+ CONTEXT.try_with(| c | { if c.runtime.get().is_entered() { None } else { Some(BlockingRegionGuard::new()) } }).unwrap_or_else(| _ | Some(BlockingRegionGuard::new()))
+}
+
+/// Disallows blocking in the current runtime context until the guard is dropped.
+fn disallow_block_in_place() -> DisallowBlockInPlaceGuard {
+ let reset = CONTEXT.try_with(| c | { if let EnterRuntime::Entered { allow_block_in_place: true } = c.runtime.get() { c.runtime.set(EnterRuntime::Entered { allow_block_in_place: false }); true } else { false } });
+ DisallowBlockInPlaceGuard(reset.unwrap_or(false))
+}
+
+impl BlockingRegionGuard {
+ fn new() -> BlockingRegionGuard {
+ BlockingRegionGuard { _p: PhantomData }
+ }
+ 
+ fn block_on(&mut self, f: F) -> Result<F::Output, AccessError> {
+ use crate::runtime::park::CachedParkThread;
+ let mut park = CachedParkThread::new();
+ park.block_on(f)
+ }
+ 
+ fn block_on_timeout(&mut self, f: F, timeout: Duration) -> Result<F::Output, ()> {
+ use crate::runtime::park::CachedParkThread;
+ use std::task::Context;
+ use std::task::Poll::Ready;
+ use std::time::Instant;
+ let mut park = CachedParkThread::new();
+ let waker = park.waker().map_err(| _ | ()) ?;
+ let mut cx = Context::from_waker(&waker);
+ pin!(f);
+ let when = Instant::now() + timeout;
+ loop { if let Ready(v) = crate::task::coop::budget(| | f.as_mut().poll(&mut cx)) { return Ok(v); } let now = Instant::now(); if now >= when { return Err(()); } park.park_timeout(when - now); }
+ }
+ 
+}
+
+impl Drop for DisallowBlockInPlaceGuard {
+ fn drop(&mut self) {
+ if self.0 { CONTEXT.with(| c | { if let EnterRuntime::Entered { allow_block_in_place: false } = c.runtime.get() { c.runtime.set(EnterRuntime::Entered { allow_block_in_place: true }); } }); }
+ }
+ 
+}
+

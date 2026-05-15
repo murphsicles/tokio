@@ -1,0 +1,4 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/util/mod.rs
+
+#[cfg(all(tokio_unstable, feature = "time", feature = "rt-multi-thread"))]
+mod time_alt;

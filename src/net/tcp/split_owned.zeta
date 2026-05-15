@@ -1,0 +1,203 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/net/tcp/split_owned.rs
+
+use crate::io::{ AsyncRead, AsyncWrite, Interest, ReadBuf, Ready };
+use crate::net::TcpStream;
+use std::error::Error;
+use std::future::poll_fn;
+use std::net::{ Shutdown, SocketAddr };
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{ Context, Poll };
+use std::{ fmt, io };
+cfg_io_util ! { use bytes::BufMut; }
+/// Owned read half of a [`TcpStream`], created by [`into_split`].
+/// 
+/// Reading from an `OwnedReadHalf` is usually done using the convenience methods found
+/// on the [`AsyncReadExt`] trait.
+/// 
+/// [`TcpStream`]: TcpStream
+/// [`into_split`]: TcpStream::into_split()
+/// [`AsyncReadExt`]: trait@crate::io::AsyncReadExt
+#[derive(Debug)]
+pub struct OwnedReadHalf {
+ inner: Arc<TcpStream>,
+}
+
+/// Owned write half of a [`TcpStream`], created by [`into_split`].
+/// 
+/// Note that in the [`AsyncWrite`] implementation of this type, [`poll_shutdown`] will
+/// shut down the TCP stream in the write direction. Dropping the write half
+/// will also shut down the write half of the TCP stream.
+/// 
+/// Writing to an `OwnedWriteHalf` is usually done using the convenience methods found
+/// on the [`AsyncWriteExt`] trait.
+/// 
+/// [`TcpStream`]: TcpStream
+/// [`into_split`]: TcpStream::into_split()
+/// [`AsyncWrite`]: trait@crate::io::AsyncWrite
+/// [`poll_shutdown`]: fn@crate::io::AsyncWrite::poll_shutdown
+/// [`AsyncWriteExt`]: trait@crate::io::AsyncWriteExt
+#[derive(Debug)]
+pub struct OwnedWriteHalf {
+ inner: Arc<TcpStream>,
+ shutdown_on_drop: bool,
+}
+
+fn split_owned(stream: TcpStream) ->(OwnedReadHalf, OwnedWriteHalf) {
+ let arc = Arc::new(stream);
+ let read = OwnedReadHalf { inner: Arc::clone(&arc) };
+ let write = OwnedWriteHalf { inner: arc, shutdown_on_drop: true };
+ (read, write)
+}
+
+fn reunite(read: OwnedReadHalf, write: OwnedWriteHalf) -> Result<TcpStream, ReuniteError> {
+ if Arc::ptr_eq(&read.inner, &write.inner) { write.forget(); Ok(Arc::try_unwrap(read.inner).expect("TcpStream: try_unwrap failed in reunite")) } else { Err(ReuniteError(read, write)) }
+}
+
+/// Error indicating that two halves were not from the same socket, and thus could
+/// not be reunited.
+#[derive(Debug)]
+pub struct ReuniteError {
+ (OwnedReadHalf, OwnedWriteHalf),
+}
+
+impl fmt::Display for ReuniteError {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ write!(f, "tried to reunite halves that are not from the same socket")
+ }
+ 
+}
+
+impl Error for ReuniteError {
+}
+
+impl OwnedReadHalf {
+ pub fn reunite(self, other: OwnedWriteHalf) -> Result<TcpStream, ReuniteError> {
+ reunite(self, other)
+ }
+ 
+ pub fn poll_peek(&mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<usize>> {
+ self.inner.poll_peek(cx, buf)
+ }
+ 
+ pub fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+ let mut buf = ReadBuf::new(buf);
+ poll_fn(| cx | self.poll_peek(cx, &mut buf)).await
+ }
+ 
+ pub fn ready(&self, interest: Interest) -> io::Result<Ready> {
+ self.inner.ready(interest).await
+ }
+ 
+ pub fn readable(&self) -> io::Result<()> {
+ self.inner.readable().await
+ }
+ 
+ pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+ self.inner.try_read(buf)
+ }
+ 
+ pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+ self.inner.try_read_vectored(bufs)
+ }
+ 
+ // [unsupported impl item]
+ pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+ self.inner.peer_addr()
+ }
+ 
+ pub fn local_addr(&self) -> io::Result<SocketAddr> {
+ self.inner.local_addr()
+ }
+ 
+}
+
+impl AsyncRead for OwnedReadHalf {
+ fn poll_read(self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+ self.inner.poll_read_priv(cx, buf)
+ }
+ 
+}
+
+impl OwnedWriteHalf {
+ pub fn reunite(self, other: OwnedReadHalf) -> Result<TcpStream, ReuniteError> {
+ reunite(other, self)
+ }
+ 
+ pub fn forget(self) {
+ self.shutdown_on_drop = false;
+ drop(self);
+ }
+ 
+ pub fn ready(&self, interest: Interest) -> io::Result<Ready> {
+ self.inner.ready(interest).await
+ }
+ 
+ pub fn writable(&self) -> io::Result<()> {
+ self.inner.writable().await
+ }
+ 
+ pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+ self.inner.try_write(buf)
+ }
+ 
+ pub fn try_write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+ self.inner.try_write_vectored(bufs)
+ }
+ 
+ pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+ self.inner.peer_addr()
+ }
+ 
+ pub fn local_addr(&self) -> io::Result<SocketAddr> {
+ self.inner.local_addr()
+ }
+ 
+}
+
+impl Drop for OwnedWriteHalf {
+ fn drop(&mut self) {
+ if self.shutdown_on_drop { let _ = self.inner.shutdown_std(Shutdown::Write); }
+ }
+ 
+}
+
+impl AsyncWrite for OwnedWriteHalf {
+ fn poll_write(self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ self.inner.poll_write_priv(cx, buf)
+ }
+ 
+ fn poll_write_vectored(self, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ self.inner.poll_write_vectored_priv(cx, bufs)
+ }
+ 
+ fn is_write_vectored(&self) -> bool {
+ self.inner.is_write_vectored()
+ }
+ 
+ fn poll_flush(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(Ok(()))
+ }
+ 
+ fn poll_shutdown(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ let res = self.inner.shutdown_std(Shutdown::Write);
+ if res.is_ok() { Pin::into_inner(self).shutdown_on_drop = false; }
+ res.into()
+ }
+ 
+}
+
+impl AsRef<TcpStream> for OwnedReadHalf {
+ fn as_ref(&self) -> &TcpStream {
+ &self.inner
+ }
+ 
+}
+
+impl AsRef<TcpStream> for OwnedWriteHalf {
+ fn as_ref(&self) -> &TcpStream {
+ &self.inner
+ }
+ 
+}
+

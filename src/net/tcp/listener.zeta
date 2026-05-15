@@ -1,0 +1,88 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/net/tcp/listener.rs
+
+use crate::io::{ Interest, PollEvented };
+use crate::net::tcp::TcpStream;
+use crate::util::check_socket_for_blocking;
+cfg_not_wasip1 ! { use crate::net::{ to_socket_addrs, ToSocketAddrs }; }
+use std::fmt;
+use std::io;
+use std::net::{ self, SocketAddr };
+use std::task::{ ready, Context, Poll };
+cfg_net ! { #[doc = " A TCP socket server, listening for connections."] #[doc = ""] #[doc = " You can accept a new connection by using the [`accept`](`TcpListener::accept`)"] #[doc = " method."] #[doc = ""] #[doc = " A `TcpListener` can be turned into a `Stream` with [`TcpListenerStream`]."] #[doc = ""] #[doc = " The socket will be closed when the value is dropped."] #[doc = ""] #[doc = " [`TcpListenerStream`]: https://docs.rs/tokio-stream/0.1/tokio_stream/wrappers/struct.TcpListenerStream.html"] #[doc = ""] #[doc = " # Errors"] #[doc = ""] #[doc = " Note that accepting a connection can lead to various errors and not all"] #[doc = " of them are necessarily fatal ‒ for example having too many open file"] #[doc = " descriptors or the other side closing the connection while it waits in"] #[doc = " an accept queue. These would terminate the stream if not handled in any"] #[doc = " way."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " Using `accept`:"] #[doc = " ```no_run"] #[doc = " use tokio::net::TcpListener;"] #[doc = ""] #[doc = " use std::io;"] #[doc = ""] #[doc = " async fn process_socket<T>(socket: T) {"] #[doc = " # drop(socket);"] #[doc = " // do work with socket here"] #[doc = " }"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() -> io::Result<()> {"] #[doc = " let listener = TcpListener::bind(\"127.0.0.1:8080\").await?;"] #[doc = ""] #[doc = " loop {"] #[doc = " let(socket, _) = listener.accept().await?;"] #[doc = " process_socket(socket).await;"] #[doc = " }"] #[doc = " }"] #[doc = " ```"] pub struct TcpListener { io : PollEvented<mio::net::TcpListener> } }
+impl TcpListener {
+ // [unsupported impl item]
+ pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
+ let _ = self.io.registration().async_io(Interest::READABLE, | | self.io.accept()).await ?;
+ let stream = TcpStream::new(mio) ?;
+ Ok((stream, addr))
+ }
+ 
+ pub fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
+ loop { let ev = ready!(self.io.registration().poll_read_ready(cx)) ?; match self.io.accept() { Ok((io, addr)) => { let io = TcpStream::new(io) ?; return Poll::Ready(Ok((io, addr))); } Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => { self.io.registration().clear_readiness(ev); } Err(e) => return Poll::Ready(Err(e)) } }
+ }
+ 
+ pub fn from_std(listener: net::TcpListener) -> io::Result<TcpListener> {
+ check_socket_for_blocking(&listener) ?;
+ let io = mio::net::TcpListener::from_std(listener);
+ let io = PollEvented::new(io) ?;
+ Ok(TcpListener { io })
+ }
+ 
+ pub fn into_std(self) -> io::Result<std::net::TcpListener> {
+ #[cfg(unix)] { use std::os::unix::io::{ FromRawFd, IntoRawFd }; self.io.into_inner().map(IntoRawFd::into_raw_fd).map(| raw_fd | unsafe { std::net::TcpListener::from_raw_fd(raw_fd) }) }
+ #[cfg(windows)] { use std::os::windows::io::{ FromRawSocket, IntoRawSocket }; self.io.into_inner().map(| io | io.into_raw_socket()).map(| raw_socket | unsafe { std::net::TcpListener::from_raw_socket(raw_socket) }) }
+ #[cfg(target_os = "wasi")] { use std::os::fd::{ FromRawFd, IntoRawFd }; self.io.into_inner().map(| io | io.into_raw_fd()).map(| raw_fd | unsafe { std::net::TcpListener::from_raw_fd(raw_fd) }) }
+ }
+ 
+ // [unsupported impl item]
+ pub fn local_addr(&self) -> io::Result<SocketAddr> {
+ self.io.local_addr()
+ }
+ 
+ pub fn ttl(&self) -> io::Result<u32> {
+ self.io.ttl()
+ }
+ 
+ pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+ self.io.set_ttl(ttl)
+ }
+ 
+}
+
+impl TryFrom<net::TcpListener> for TcpListener {
+ type Error = io::Error;
+ fn try_from(stream: net::TcpListener) -> Result<Self, Self::Error> {
+ Self::from_std(stream)
+ }
+ 
+}
+
+impl fmt::Debug for TcpListener {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ (*self.io).fmt(f)
+ }
+ 
+}
+
+#[cfg(unix)]
+mod sys {
+ use super::TcpListener;
+ use std::os::unix::prelude::*;
+ impl AsRawFd for TcpListener {
+ fn as_raw_fd(&self) -> RawFd {
+ self.io.as_raw_fd()
+ }
+ 
+ }
+ 
+ impl AsFd for TcpListener {
+ fn as_fd(&self) -> BorrowedFd<'_> {
+ unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+ }
+ 
+ }
+ 
+}
+
+cfg_unstable ! { #[cfg(target_os = "wasi")] mod sys { use super::TcpListener; use std::os::fd::{ RawFd, BorrowedFd, AsRawFd, AsFd }; impl AsRawFd for TcpListener { fn as_raw_fd(&self) -> RawFd { self.io.as_raw_fd() } } impl AsFd for TcpListener { fn as_fd(&self) -> BorrowedFd <'_ > { unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) } } } } }
+cfg_windows ! { use crate::os::windows::io::{ AsRawSocket, RawSocket, AsSocket, BorrowedSocket }; impl AsRawSocket for TcpListener { fn as_raw_socket(&self) -> RawSocket { self.io.as_raw_socket() } } impl AsSocket for TcpListener { fn as_socket(&self) -> BorrowedSocket <'_ > { unsafe { BorrowedSocket::borrow_raw(self.as_raw_socket()) } } } }

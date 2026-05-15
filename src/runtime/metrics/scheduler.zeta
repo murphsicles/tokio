@@ -1,0 +1,32 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/metrics/scheduler.rs
+
+use crate::loom::sync::atomic::Ordering::Relaxed;
+use crate::util::metric_atomics::MetricAtomicU64;
+/// Retrieves metrics from the Tokio runtime.
+/// 
+/// **Note**: This is an [unstable API][unstable]. The public API of this type
+/// may break in 1.x releases. See [the documentation on unstable
+/// features][unstable] for details.
+/// 
+/// [unstable]: crate#unstable-features
+#[derive(Debug)]
+struct SchedulerMetrics {
+ remote_schedule_count: MetricAtomicU64,
+ budget_forced_yield_count: MetricAtomicU64,
+}
+
+impl SchedulerMetrics {
+ fn new() -> SchedulerMetrics {
+ SchedulerMetrics { remote_schedule_count: MetricAtomicU64::new(0), budget_forced_yield_count: MetricAtomicU64::new(0) }
+ }
+ 
+ fn inc_remote_schedule_count(&self) {
+ self.remote_schedule_count.add(1, Relaxed);
+ }
+ 
+ fn inc_budget_forced_yield_count(&self) {
+ self.budget_forced_yield_count.add(1, Relaxed);
+ }
+ 
+}
+

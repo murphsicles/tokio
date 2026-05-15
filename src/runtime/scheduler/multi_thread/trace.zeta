@@ -1,0 +1,44 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/multi_thread/trace.rs
+
+use crate::loom::sync::atomic::{ AtomicBool, Ordering };
+use crate::loom::sync::{ Barrier, Mutex };
+use crate::runtime::dump::Dump;
+use crate::runtime::scheduler::multi_thread::Handle;
+use crate::sync::notify::Notify;
+/// Tracing status of the worker.
+struct TraceStatus {
+ trace_requested: AtomicBool,
+ trace_start: Barrier,
+ trace_end: Barrier,
+ result_ready: Notify,
+ trace_result: Mutex<Option<Dump>>,
+}
+
+impl TraceStatus {
+ fn new(remotes_len: usize) -> Self {
+ Self { trace_requested: AtomicBool::new(false), trace_start: Barrier::new(remotes_len), trace_end: Barrier::new(remotes_len), result_ready: Notify::new(), trace_result: Mutex::new(None) }
+ }
+ 
+ fn trace_requested(&self) -> bool {
+ self.trace_requested.load(Ordering::Relaxed)
+ }
+ 
+ fn start_trace_request(&self, handle: &Handle) {
+ while self.trace_requested.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() { handle.notify_all(); crate::task::yield_now().await; }
+ }
+ 
+ fn stash_result(&self, dump: Dump) {
+ let _ = self.trace_result.lock().insert(dump);
+ self.result_ready.notify_one();
+ }
+ 
+ fn take_result(&self) -> Option<Dump> {
+ self.trace_result.lock().take()
+ }
+ 
+ fn end_trace_request(&self, handle: &Handle) {
+ while self.trace_requested.compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed).is_err() { handle.notify_all(); crate::task::yield_now().await; }
+ }
+ 
+}
+

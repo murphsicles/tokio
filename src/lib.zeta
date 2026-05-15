@@ -1,0 +1,92 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/lib.rs
+
+#[cfg(not(any(target_pointer_width = "32", target_pointer_width = "64")))] compile_error ! { "Tokio requires the platform pointer width to be at least 32 bits" }
+#[cfg(all(not(tokio_unstable), target_family = "wasm", any(feature = "fs", feature = "io-std", feature = "net", feature = "process", feature = "rt-multi-thread", feature = "signal")))] compile_error!("Only features sync,macros,io-util,rt,time are supported on wasm.");
+#[cfg(all(not(tokio_unstable), feature = "io-uring"))] compile_error!("The `io-uring` feature requires `--cfg tokio_unstable`.");
+#[cfg(all(not(tokio_unstable), feature = "taskdump"))] compile_error!("The `taskdump` feature requires `--cfg tokio_unstable`.");
+#[cfg(all(feature = "taskdump", not(doc), not(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))))] compile_error!("The `taskdump` feature is only currently supported on \
+linux, on `aarch64`, `x86` and `x86_64`.");
+#[macro_use]
+pub mod macros;
+cfg_fs ! { pub mod fs; }
+mod future;
+pub mod io;
+pub mod net;
+mod loom;
+cfg_process ! { pub mod process; }
+#[cfg(any(feature = "fs", feature = "io-std", feature = "net", all(windows, feature = "process") ))]
+mod blocking;
+cfg_rt ! { pub mod runtime; }
+cfg_not_rt ! { pub(crate) mod runtime; }
+cfg_signal ! { pub mod signal; }
+cfg_signal_internal ! { #[cfg(not(feature = "signal"))] #[allow(dead_code)] #[allow(unreachable_pub)] pub(crate) mod signal; }
+cfg_sync ! { pub mod sync; }
+cfg_not_sync ! { mod sync; }
+#[cfg_attr(docsrs, doc(cfg(feature = "rt")))]
+pub mod task;
+cfg_rt ! { pub use task::spawn; }
+cfg_time ! { pub mod time; }
+mod trace {
+ cfg_taskdump ! { pub(crate) use crate::runtime::task::trace::trace_leaf; }
+ cfg_not_taskdump ! { #[inline(always)] #[allow(dead_code)] pub(crate) fn trace_leaf(_: &mut std::task::Context <'_ >) -> std::task::Poll<()> { std::task::Poll::Ready(()) } }
+ #[cfg_attr(not(feature = "sync"), allow(dead_code))]
+ fn async_trace_leaf() {
+ std::future::poll_fn(trace_leaf).await
+ }
+ 
+}
+
+mod util;
+/// Due to the `Stream` trait's inclusion in `std` landing later than Tokio's 1.0
+/// release, most of the Tokio stream utilities have been moved into the [`tokio-stream`]
+/// crate.
+/// 
+/// # Why was `Stream` not included in Tokio 1.0?
+/// 
+/// Originally, we had planned to ship Tokio 1.0 with a stable `Stream` type
+/// but unfortunately the [RFC] had not been merged in time for `Stream` to
+/// reach `std` on a stable compiler in time for the 1.0 release of Tokio. For
+/// this reason, the team has decided to move all `Stream` based utilities to
+/// the [`tokio-stream`] crate. While this is not ideal, once `Stream` has made
+/// it into the standard library and the `MSRV` period has passed, we will implement
+/// stream for our different types.
+/// 
+/// While this may seem unfortunate, not all is lost as you can get much of the
+/// `Stream` support with `async/await` and `while let` loops. It is also possible
+/// to create a `impl Stream` from `async fn` using the [`async-stream`] crate.
+/// 
+/// [`tokio-stream`]: https://docs.rs/tokio-stream
+/// [`async-stream`]: https://docs.rs/async-stream
+/// [RFC]: https://github.com/rust-lang/rfcs/pull/2996
+/// 
+/// # Example
+/// 
+/// Convert a [`sync::mpsc::Receiver`] to an `impl Stream`.
+/// 
+/// ```rust,no_run
+/// use tokio::sync::mpsc;
+/// 
+/// let(tx, mut rx) = mpsc::channel::<usize>(16);
+/// 
+/// let stream = async_stream::stream! {
+/// while let Some(item) = rx.recv().await {
+/// yield item;
+/// }
+/// };
+/// ```
+pub mod stream {
+}
+
+#[cfg(all(docsrs, unix))]
+pub mod doc;
+#[cfg(any(feature = "net", feature = "fs"))] #[cfg(all(docsrs, unix))] #[allow(unused)] pub(crate) use self::doc::os;
+#[cfg(not(all(docsrs, unix)))] #[allow(unused)] pub(crate) use std::os;
+cfg_macros ! { #[doc = " Implementation detail of the `select!` macro. This macro is **not**"] #[doc = " intended to be used as part of the public API and is permitted to"] #[doc = " change."] #[doc(hidden)] pub use tokio_macros::select_priv_declare_output_enum; #[doc = " Implementation detail of the `select!` macro. This macro is **not**"] #[doc = " intended to be used as part of the public API and is permitted to"] #[doc = " change."] #[doc(hidden)] pub use tokio_macros::select_priv_clean_pattern; cfg_rt ! { #[cfg(feature = "rt-multi-thread")] #[cfg_attr(docsrs, doc(cfg(feature = "macros")))] #[doc(inline)] pub use tokio_macros::main; #[cfg(feature = "rt-multi-thread")] #[cfg_attr(docsrs, doc(cfg(feature = "macros")))] #[doc(inline)] pub use tokio_macros::test; cfg_not_rt_multi_thread ! { #[doc(inline)] pub use tokio_macros::main_rt as main; #[doc(inline)] pub use tokio_macros::test_rt as test; } } cfg_not_rt ! { #[doc(inline)] pub use tokio_macros::main_fail as main; #[doc(inline)] pub use tokio_macros::test_fail as test; } }
+#[cfg(feature = "io-util")]
+#[cfg(test)]
+fn is_unpin<T: Unpin>() {
+}
+
+/// fuzz test(`fuzz_linked_list`)
+#[cfg(fuzzing)]
+pub mod fuzz;

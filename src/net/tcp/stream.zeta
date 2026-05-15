@@ -1,0 +1,252 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/net/tcp/stream.rs
+
+cfg_not_wasi ! { use std::time::Duration; }
+cfg_not_wasip1 ! { use crate::net::{ to_socket_addrs, ToSocketAddrs }; use std::future::poll_fn; }
+use crate::io::{ AsyncRead, AsyncWrite, Interest, PollEvented, ReadBuf, Ready };
+use crate::net::tcp::split::{ split, ReadHalf, WriteHalf };
+use crate::net::tcp::split_owned::{ split_owned, OwnedReadHalf, OwnedWriteHalf };
+use crate::util::check_socket_for_blocking;
+use std::fmt;
+use std::io;
+use std::net::{ Shutdown, SocketAddr };
+use std::pin::Pin;
+use std::task::{ ready, Context, Poll };
+cfg_io_util ! { use bytes::BufMut; }
+cfg_net ! { #[doc = " A TCP stream between a local and a remote socket."] #[doc = ""] #[doc = " A TCP stream can either be created by connecting to an endpoint, via the"] #[doc = " [`connect`] method, or by [accepting] a connection from a [listener]. A"] #[doc = " TCP stream can also be created via the [`TcpSocket`] type."] #[doc = ""] #[doc = " Reading and writing to a `TcpStream` is usually done using the"] #[doc = " convenience methods found on the [`AsyncReadExt`] and [`AsyncWriteExt`]"] #[doc = " traits."] #[doc = ""] #[doc = " [`connect`]: method@TcpStream::connect"] #[doc = " [accepting]: method@crate::net::TcpListener::accept"] #[doc = " [listener]: struct@crate::net::TcpListener"] #[doc = " [`TcpSocket`]: struct@crate::net::TcpSocket"] #[doc = " [`AsyncReadExt`]: trait@crate::io::AsyncReadExt"] #[doc = " [`AsyncWriteExt`]: trait@crate::io::AsyncWriteExt"] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```no_run"] #[doc = " use tokio::net::TcpStream;"] #[doc = " use tokio::io::AsyncWriteExt;"] #[doc = " use std::error::Error;"] #[doc = ""] #[doc = " #[tokio::main]"] #[doc = " async fn main() -> Result<(), Box<dyn Error>> {"] #[doc = " // Connect to a peer"] #[doc = " let mut stream = TcpStream::connect(\"127.0.0.1: 8080\").await?;"] #[doc = ""] #[doc = " // Write some data."] #[doc = " stream.write_all(b\"hello world!\").await?;"] #[doc = ""] #[doc = " Ok(())"] #[doc = " }"] #[doc = " ```"] #[doc = ""] #[doc = " The [`write_all`] method is defined on the [`AsyncWriteExt`] trait."] #[doc = ""] #[doc = " [`write_all`]: fn@crate::io::AsyncWriteExt::write_all"] #[doc = " [`AsyncWriteExt`]: trait@crate::io::AsyncWriteExt"] #[doc = ""] #[doc = " To shut down the stream in the write direction, you can call the"] #[doc = " [`shutdown()`] method. This will cause the other peer to receive a read of"] #[doc = " length 0, indicating that no more data will be sent. This only closes"] #[doc = " the stream in one direction."] #[doc = ""] #[doc = " [`shutdown()`]: fn@crate::io::AsyncWriteExt::shutdown"] pub struct TcpStream { io: PollEvented<mio::net::TcpStream> } }
+impl TcpStream {
+ // [unsupported impl item]
+ fn new(connected: mio::net::TcpStream) -> io::Result<TcpStream> {
+ let io = PollEvented::new(connected) ?;
+ Ok(TcpStream { io })
+ }
+ 
+ pub fn from_std(stream: std::net::TcpStream) -> io::Result<TcpStream> {
+ check_socket_for_blocking(&stream) ?;
+ let io = mio::net::TcpStream::from_std(stream);
+ let io = PollEvented::new(io) ?;
+ Ok(TcpStream { io })
+ }
+ 
+ pub fn into_std(self) -> io::Result<std::net::TcpStream> {
+ #[cfg(unix)] { use std::os::unix::io::{ FromRawFd, IntoRawFd }; self.io.into_inner().map(IntoRawFd::into_raw_fd).map(| raw_fd | unsafe { std::net::TcpStream::from_raw_fd(raw_fd) }) }
+ #[cfg(windows)] { use std::os::windows::io::{ FromRawSocket, IntoRawSocket }; self.io.into_inner().map(| io | io.into_raw_socket()).map(| raw_socket | unsafe { std::net::TcpStream::from_raw_socket(raw_socket) }) }
+ #[cfg(target_os = "wasi")] { use std::os::fd::{ FromRawFd, IntoRawFd }; self.io.into_inner().map(| io | io.into_raw_fd()).map(| raw_fd | unsafe { std::net::TcpStream::from_raw_fd(raw_fd) }) }
+ }
+ 
+ pub fn local_addr(&self) -> io::Result<SocketAddr> {
+ self.io.local_addr()
+ }
+ 
+ pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+ self.io.take_error()
+ }
+ 
+ pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+ self.io.peer_addr()
+ }
+ 
+ pub fn poll_peek(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<usize>> {
+ loop { let ev = ready!(self.io.registration().poll_read_ready(cx)) ?; let b = unsafe { &mut * (buf.unfilled_mut() as * mut [std::mem::MaybeUninit<u8>] as * mut [u8]) }; match self.io.peek(b) { Ok(ret) => { unsafe { buf.assume_init(ret) }; buf.advance(ret); return Poll::Ready(Ok(ret)); } Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => { self.io.registration().clear_readiness(ev); } Err(e) => return Poll::Ready(Err(e)) } }
+ }
+ 
+ pub fn ready(&self, interest: Interest) -> io::Result<Ready> {
+ let event = self.io.registration().readiness(interest).await ?;
+ Ok(event.ready)
+ }
+ 
+ pub fn readable(&self) -> io::Result<()> {
+ self.ready(Interest::READABLE).await ?;
+ Ok(())
+ }
+ 
+ pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.io.registration().poll_read_ready(cx).map_ok(| _ | ())
+ }
+ 
+ pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+ use std::io::Read;
+ self.io.registration().try_io(Interest::READABLE, | | (&*self.io).read(buf))
+ }
+ 
+ pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+ use std::io::Read;
+ self.io.registration().try_io(Interest::READABLE, | | (&*self.io).read_vectored(bufs))
+ }
+ 
+ // [unsupported impl item]
+ pub fn writable(&self) -> io::Result<()> {
+ self.ready(Interest::WRITABLE).await ?;
+ Ok(())
+ }
+ 
+ pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.io.registration().poll_write_ready(cx).map_ok(| _ | ())
+ }
+ 
+ pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+ use std::io::Write;
+ self.io.registration().try_io(Interest::WRITABLE, | | (&*self.io).write(buf))
+ }
+ 
+ pub fn try_write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+ use std::io::Write;
+ self.io.registration().try_io(Interest::WRITABLE, | | (&*self.io).write_vectored(bufs))
+ }
+ 
+ pub fn try_io(&self, interest: Interest, f: impl FnOnce) -> io::Result<R> {
+ self.io.registration().try_io(interest, | | self.io.try_io(f))
+ }
+ 
+ pub fn async_io(&self, interest: Interest, f: impl FnMut) -> io::Result<R> {
+ self.io.registration().async_io(interest, | | self.io.try_io(&mut f)).await
+ }
+ 
+ pub fn peek(&self, buf: &mut [u8]) -> io::Result<usize> {
+ self.io.registration().async_io(Interest::READABLE, | | self.io.peek(buf)).await
+ }
+ 
+ fn shutdown_std(&self, how: Shutdown) -> io::Result<()> {
+ match self.io.shutdown(how) { Err(err) if err.kind() == std::io::ErrorKind::NotConnected => Ok(()), result => result }
+ }
+ 
+ pub fn nodelay(&self) -> io::Result<bool> {
+ self.io.nodelay()
+ }
+ 
+ pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+ self.io.set_nodelay(nodelay)
+ }
+ 
+ pub fn quickack(&self) -> io::Result<bool> {
+ socket2::SockRef::from(self).tcp_quickack()
+ }
+ 
+ pub fn set_quickack(&self, quickack: bool) -> io::Result<()> {
+ socket2::SockRef::from(self).set_tcp_quickack(quickack)
+ }
+ 
+ // [unsupported impl item]
+ pub fn ttl(&self) -> io::Result<u32> {
+ self.io.ttl()
+ }
+ 
+ pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+ self.io.set_ttl(ttl)
+ }
+ 
+ pub fn split(&mut self) ->(ReadHalf<'a>, WriteHalf<'a>) {
+ split(self)
+ }
+ 
+ pub fn into_split(self) ->(OwnedReadHalf, OwnedWriteHalf) {
+ split_owned(self)
+ }
+ 
+ fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+ unsafe { self.io.poll_read(cx, buf) }
+ }
+ 
+ fn poll_write_priv(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ self.io.poll_write(cx, buf)
+ }
+ 
+ fn poll_write_vectored_priv(&self, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ self.io.poll_write_vectored(cx, bufs)
+ }
+ 
+}
+
+impl TryFrom<std::net::TcpStream> for TcpStream {
+ type Error = io::Error;
+ fn try_from(stream: std::net::TcpStream) -> Result<Self, Self::Error> {
+ Self::from_std(stream)
+ }
+ 
+}
+
+impl AsyncRead for TcpStream {
+ fn poll_read(self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+ self.poll_read_priv(cx, buf)
+ }
+ 
+}
+
+impl AsyncWrite for TcpStream {
+ fn poll_write(self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ self.poll_write_priv(cx, buf)
+ }
+ 
+ fn poll_write_vectored(self, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ self.poll_write_vectored_priv(cx, bufs)
+ }
+ 
+ fn is_write_vectored(&self) -> bool {
+ true
+ }
+ 
+ fn poll_flush(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(Ok(()))
+ }
+ 
+ fn poll_shutdown(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.shutdown_std(std::net::Shutdown::Write) ?;
+ Poll::Ready(Ok(()))
+ }
+ 
+}
+
+impl fmt::Debug for TcpStream {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ (*self.io).fmt(f)
+ }
+ 
+}
+
+impl AsRef<Self> for TcpStream {
+ fn as_ref(&self) -> &Self {
+ self
+ }
+ 
+}
+
+#[cfg(unix)]
+mod sys {
+ use super::TcpStream;
+ use std::os::unix::prelude::*;
+ impl AsRawFd for TcpStream {
+ fn as_raw_fd(&self) -> RawFd {
+ self.io.as_raw_fd()
+ }
+ 
+ }
+ 
+ impl AsFd for TcpStream {
+ fn as_fd(&self) -> BorrowedFd<'_> {
+ unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+ }
+ 
+ }
+ 
+}
+
+cfg_windows ! { use crate::os::windows::io::{ AsRawSocket, RawSocket, AsSocket, BorrowedSocket }; impl AsRawSocket for TcpStream { fn as_raw_socket(&self) -> RawSocket { self.io.as_raw_socket() } } impl AsSocket for TcpStream { fn as_socket(&self) -> BorrowedSocket <'_ > { unsafe { BorrowedSocket::borrow_raw(self.as_raw_socket()) } } } }
+#[cfg(all(tokio_unstable, target_os = "wasi"))]
+mod sys {
+ use super::TcpStream;
+ use std::os::fd::{ AsFd, AsRawFd, BorrowedFd, RawFd };
+ impl AsRawFd for TcpStream {
+ fn as_raw_fd(&self) -> RawFd {
+ self.io.as_raw_fd()
+ }
+ 
+ }
+ 
+ impl AsFd for TcpStream {
+ fn as_fd(&self) -> BorrowedFd<'_> {
+ unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+ }
+ 
+ }
+ 
+}
+

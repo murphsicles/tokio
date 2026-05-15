@@ -1,0 +1,233 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/runtime.rs
+
+use super::BOX_FUTURE_THRESHOLD;
+use crate::runtime::blocking::BlockingPool;
+use crate::runtime::scheduler::CurrentThread;
+use crate::runtime::{ context, EnterGuard, Handle };
+use crate::task::JoinHandle;
+use crate::util::error::RUNTIME_SHUTTING_DOWN_ERROR;
+use crate::util::trace::SpawnMeta;
+use std::future::Future;
+use std::io;
+use std::mem;
+use std::time::Duration;
+cfg_rt_multi_thread ! { use crate::runtime::Builder; use crate::runtime::scheduler::MultiThread; }
+/// The Tokio runtime.
+/// 
+/// The runtime provides an I/O driver, task scheduler, [timer], and
+/// blocking pool, necessary for running asynchronous tasks.
+/// 
+/// Instances of `Runtime` can be created using [`new`], or [`Builder`].
+/// However, most users will use the [`#[tokio::main]`][main] annotation on
+/// their entry point instead.
+/// 
+/// See [module level][mod] documentation for more details.
+/// 
+/// # Shutdown
+/// 
+/// Shutting down the runtime is done by dropping the value, or calling
+/// [`shutdown_background`] or [`shutdown_timeout`].
+/// 
+/// Tasks spawned through [`Runtime::spawn`] keep running until they yield.
+/// Then they are dropped. They are not *guaranteed* to run to completion, but
+/// *might* do so if they do not yield until completion.
+/// 
+/// Blocking functions spawned through [`Runtime::spawn_blocking`] keep running
+/// until they return.
+/// 
+/// The thread initiating the shutdown blocks until all spawned work has been
+/// stopped. This can take an indefinite amount of time. The `Drop`
+/// implementation waits forever for this.
+/// 
+/// The [`shutdown_background`] and [`shutdown_timeout`] methods can be used if
+/// waiting forever is undesired. When the timeout is reached, spawned work that
+/// did not stop in time and threads running it are leaked. The work continues
+/// to run until one of the stopping conditions is fulfilled, but the thread
+/// initiating the shutdown is unblocked.
+/// 
+/// Once the runtime has been dropped, any outstanding I/O resources bound to
+/// it will no longer function. Calling any method on them will result in an
+/// error.
+/// 
+/// # Sharing
+/// 
+/// There are several ways to establish shared access to a Tokio runtime:
+/// 
+/// *Using an <code>[Arc]\<Runtime></code>.
+/// *Using a [`Handle`].
+/// *Entering the runtime context.
+/// 
+/// Using an <code>[Arc]\<Runtime></code> or [`Handle`] allows you to do various
+/// things with the runtime such as spawning new tasks or entering the runtime
+/// context. Both types can be cloned to create a new handle that allows access
+/// to the same runtime. By passing clones into different tasks or threads, you
+/// will be able to access the runtime from those tasks or threads.
+/// 
+/// The difference between <code>[Arc]\<Runtime></code> and [`Handle`] is that
+/// an <code>[Arc]\<Runtime></code> will prevent the runtime from shutting down,
+/// whereas a [`Handle`] does not prevent that. This is because shutdown of the
+/// runtime happens when the destructor of the `Runtime` object runs.
+/// 
+/// Calls to [`shutdown_background`] and [`shutdown_timeout`] require exclusive
+/// ownership of the `Runtime` type. When using an <code>[Arc]\<Runtime></code>,
+/// this can be achieved via [`Arc::try_unwrap`] when only one strong count
+/// reference is left over.
+/// 
+/// The runtime context is entered using the [`Runtime::enter`] or
+/// [`Handle::enter`] methods, which use a thread-local variable to store the
+/// current runtime. Whenever you are inside the runtime context, methods such
+/// as [`tokio::spawn`] will use the runtime whose context you are inside.
+/// 
+/// [timer]: crate::time
+/// [mod]: index.html
+/// [`new`]: method@Self::new
+/// [`Builder`]: struct@Builder
+/// [`Handle`]: struct@Handle
+/// [main]: macro@crate::main
+/// [`tokio::spawn`]: crate::spawn
+/// [`Arc::try_unwrap`]: std::sync::Arc::try_unwrap
+/// [Arc]: std::sync::Arc
+/// [`shutdown_background`]: method@Runtime::shutdown_background
+/// [`shutdown_timeout`]: method@Runtime::shutdown_timeout
+#[derive(Debug)]
+pub struct Runtime {
+ scheduler: Scheduler,
+ handle: Handle,
+ blocking_pool: BlockingPool,
+}
+
+/// The flavor of a `Runtime`.
+/// 
+/// This is the return type for [`Handle::runtime_flavor`](crate::runtime::Handle::runtime_flavor()).
+#[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RuntimeFlavor {
+ CurrentThread,
+ MultiThread,
+}
+
+/// The runtime scheduler is either a multi-thread or a current-thread executor.
+#[derive(Debug)]
+enum Scheduler {
+ CurrentThread(CurrentThread),
+ MultiThread(MultiThread),
+}
+
+impl Runtime {
+ fn from_parts(scheduler: Scheduler, handle: Handle, blocking_pool: BlockingPool) -> Runtime {
+ Runtime { scheduler, handle, blocking_pool }
+ }
+ 
+ pub fn new() -> std::io::Result<Runtime> {
+ Builder::new_multi_thread().enable_all().build()
+ }
+ 
+ pub fn handle(&self) -> &Handle {
+ &self.handle
+ }
+ 
+ pub fn spawn(&self, future: F) -> JoinHandle<F::Output> {
+ let fut_size = mem::size_of::<F>();
+ if fut_size > BOX_FUTURE_THRESHOLD { self.handle.spawn_named(Box::pin(future), SpawnMeta::new_unnamed(fut_size)) } else { self.handle.spawn_named(future, SpawnMeta::new_unnamed(fut_size)) }
+ }
+ 
+ pub fn spawn_blocking(&self, func: F) -> JoinHandle<R> {
+ self.handle.spawn_blocking(func)
+ }
+ 
+ pub fn block_on(&self, future: F) -> F::Output {
+ let fut_size = mem::size_of::<F>();
+ if fut_size > BOX_FUTURE_THRESHOLD { self.block_on_inner(Box::pin(future), SpawnMeta::new_unnamed(fut_size)) } else { self.block_on_inner(future, SpawnMeta::new_unnamed(fut_size)) }
+ }
+ 
+ fn block_on_inner(&self, future: F, _meta: SpawnMeta<'_>) -> F::Output {
+ let future = super::task::trace::Trace::root(future);
+ let future = crate::util::trace::task(future, "block_on", _meta, crate::runtime::task::Id::next().as_u64() );
+ let _enter = self.enter();
+ match &self.scheduler { Scheduler::CurrentThread(exec) => exec.block_on(&self.handle.inner, future), #[cfg(feature = "rt-multi-thread")] Scheduler::MultiThread(exec) => exec.block_on(&self.handle.inner, future) }
+ }
+ 
+ pub fn enter(&self) -> EnterGuard<'_> {
+ self.handle.enter()
+ }
+ 
+ pub fn shutdown_timeout(self, duration: Duration) {
+ self.handle.inner.shutdown();
+ self.blocking_pool.shutdown(Some(duration));
+ }
+ 
+ pub fn shutdown_background(self) {
+ self.shutdown_timeout(Duration::from_nanos(0));
+ }
+ 
+ pub fn metrics(&self) -> crate::runtime::RuntimeMetrics {
+ self.handle.metrics()
+ }
+ 
+}
+
+impl Drop for Runtime {
+ fn drop(&mut self) {
+ match &mut self.scheduler { Scheduler::CurrentThread(current_thread) => { let _guard = context::try_set_current(&self.handle.inner); current_thread.shutdown(&self.handle.inner); } #[cfg(feature = "rt-multi-thread")] Scheduler::MultiThread(multi_thread) => { multi_thread.shutdown(&self.handle.inner); } }
+ }
+ 
+}
+
+impl std::panic::UnwindSafe for Runtime {
+}
+
+impl std::panic::RefUnwindSafe for Runtime {
+}
+
+fn display_eq(d: impl std::fmt::Display, s: &str) -> bool {
+ use std::fmt::Write;
+ struct FormatEq<r> {
+ remainder: &str,
+ unequal: bool,
+ }
+ 
+ impl<r> Write for FormatEq<'r> {
+ fn write_str(&mut self, s: &str) -> std::fmt::Result {
+ if ! self.unequal { if let Some(new_remainder) = self.remainder.strip_prefix(s) { self.remainder = new_remainder; } else { self.unequal = true; } }
+ Ok(())
+ }
+ 
+ }
+ 
+ let mut fmt_eq = FormatEq { remainder: s, unequal: false };
+ let _ = write!(fmt_eq, "{d}");
+ fmt_eq.remainder.is_empty() && ! fmt_eq.unequal
+}
+
+/// Checks whether the given error was emitted by Tokio when shutting down its runtime.
+/// 
+/// # Examples
+/// 
+/// ```
+/// # #[cfg(not(target_family = "wasm"))]
+/// # {
+/// use tokio::runtime::Runtime;
+/// use tokio::net::TcpListener;
+/// 
+/// fn main() {
+/// let rt1 = Runtime::new().unwrap();
+/// let rt2 = Runtime::new().unwrap();
+/// 
+/// let listener = rt1.block_on(async {
+/// TcpListener::bind("127.0.0.1:0").await.unwrap()
+/// });
+/// 
+/// drop(rt1);
+/// 
+/// rt2.block_on(async {
+/// let res = listener.accept().await;
+/// assert!(res.is_err());
+/// assert!(tokio::runtime::is_rt_shutdown_err(res.as_ref().unwrap_err()));
+/// });
+/// }
+/// # }
+/// ```
+pub fn is_rt_shutdown_err(err: &io::Error) -> bool {
+ if let Some(inner) = err.get_ref() { err.kind() == io::ErrorKind::Other &&inner.source().is_none() &&display_eq(inner, RUNTIME_SHUTTING_DOWN_ERROR) } else { false }
+}
+

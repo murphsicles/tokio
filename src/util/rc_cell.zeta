@@ -1,0 +1,38 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/util/rc_cell.rs
+
+use crate::loom::cell::UnsafeCell;
+use std::rc::Rc;
+/// This is exactly like `Cell<Option<Rc<T>>>`, except that it provides a `get`
+/// method even though `Rc` is not `Copy`.
+struct RcCell<T> {
+ inner: UnsafeCell<Option<Rc<T>>>,
+}
+
+impl<T> RcCell<T> {
+ fn new() -> Self {
+ Self { inner: UnsafeCell::new(None) }
+ }
+ 
+ fn new() -> Self {
+ Self { inner: UnsafeCell::new(None) }
+ }
+ 
+ fn with_inner(&self, f: F) -> R {
+ self.inner.with_mut(| ptr | f(unsafe { &mut * ptr }))
+ }
+ 
+ fn get(&self) -> Option<Rc<T>> {
+ unsafe { self.with_inner(| rc | rc.clone()) }
+ }
+ 
+ fn replace(&self, val: Option<Rc<T>>) -> Option<Rc<T>> {
+ unsafe { self.with_inner(| rc | std::mem::replace(rc, val)) }
+ }
+ 
+ fn set(&self, val: Option<Rc<T>>) {
+ let old = self.replace(val);
+ drop(old);
+ }
+ 
+}
+

@@ -1,0 +1,224 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/task/trace/mod.rs
+
+use crate::loom::sync::Arc;
+use crate::runtime::context;
+use crate::runtime::scheduler::{ self, current_thread, Inject };
+use crate::task::Id;
+use backtrace::BacktraceFrame;
+use std::cell::Cell;
+use std::collections::VecDeque;
+use std::ffi::c_void;
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::ptr::NonNull;
+use std::task::{ self, Poll };
+mod symbol;
+mod trace_impl;
+mod tree;
+use symbol::Symbol;
+use tree::Tree;
+use super::{ Notified, OwnedTasks, Schedule };
+type Backtrace = Vec<BacktraceFrame>;
+
+type SymbolTrace = Vec<Symbol>;
+
+/// The ambient backtracing context.
+struct Context {
+ active_frame: Cell<Option<NonNull<Frame>>>,
+ trace_leaf_fn: Cell<Option<NonNull<_>>>,
+}
+
+/// A [`Frame`] in an intrusive, doubly-linked tree of [`Frame`]s.
+struct Frame {
+ inner_addr: *const c_void,
+ parent: Option<NonNull<Frame>>,
+}
+
+/// An tree execution trace.
+/// 
+/// Traces are captured with [`Trace::capture`], rooted with [`Trace::root`]
+/// and leaved with [`trace_leaf`].
+#[derive(Clone, Debug)]
+struct Trace {
+ backtraces: Vec<Backtrace>,
+}
+
+pin_project_lite::pin_project ! { #[derive(Debug, Clone)] #[must_use = "futures do nothing unless you `.await` or poll them"] #[doc = " A future wrapper that roots traces(captured with [`Trace::capture`])."] pub struct Root<T> { #[pin] future: T } }
+const FAIL_NO_THREAD_LOCAL: &str = "The Tokio thread-local has been destroyed \
+ as part of shutting down the current \
+ thread, so collecting a taskdump is not \
+ possible.";
+
+impl Context {
+ fn new() -> Self {
+ Context { active_frame: Cell::new(None), trace_leaf_fn: Cell::new(None) }
+ }
+ 
+ fn try_with_current(f: F) -> Option<R> {
+ unsafe { crate::runtime::context::with_trace(f) }
+ }
+ 
+ fn with_current_frame(f: F) -> R {
+ unsafe { Self::try_with_current(| context | f(&context.active_frame)).expect(FAIL_NO_THREAD_LOCAL) }
+ }
+ 
+ fn current_frame_addr() -> Option<*const c_void> {
+ unsafe { Context::try_with_current(| ctx | { ctx.active_frame.get().map(| frame | frame.as_ref().inner_addr) }).flatten() }
+ }
+ 
+ fn try_with_current_trace_leaf_fn(f: F) -> Option<R> {
+ let mut ret = None;
+ let inner = | context: &Context | { if let Some(mut trace_leaf_fn) = context.trace_leaf_fn.replace(None) { let _restore = defer(move | | { context.trace_leaf_fn.set(Some(trace_leaf_fn)); }); ret = Some(f(unsafe { trace_leaf_fn.as_mut() })); } };
+ unsafe { Self::try_with_current(inner) };
+ ret
+ }
+ 
+ fn is_tracing() -> bool {
+ unsafe { Self::try_with_current(| ctx | ctx.trace_leaf_fn.get().is_some()).unwrap_or(false) }
+ }
+ 
+}
+
+/// Metadata passed into the `trace_leaf` callback for [`trace_with`]
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct TraceMeta {
+ pub root_addr: Option<*const c_void>,
+ pub trace_leaf_addr: *const c_void,
+}
+
+/// Runs `f`. If `f` hits a Tokio yield point `trace_leaf` will be invoked.
+/// 
+/// This allows taking a task dump with caller-provided task dump machinery. If `f` is the poll
+/// function of a future and that future returns `Poll::Pending`, then `trace_leaf` will be
+/// invoked. `trace_leaf` can then take a backtrace to determine exactly where the yield occurred.
+/// 
+/// # Example
+/// 
+/// ```
+/// use std::future::Future;
+/// use std::task::Poll;
+/// use tokio::runtime::dump::{trace_with, Trace, TraceMeta};
+/// 
+/// fn my_trace_leaf(_meta: &TraceMeta, count: &mut u32) {
+/// *count += 1;
+/// }
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let mut fut = std::pin::pin!(async {
+/// tokio::task::yield_now().await;
+/// });
+/// 
+/// let mut leaf_count = 0;
+/// 
+/// Trace::root(std::future::poll_fn(|cx| {
+/// trace_with(
+/// || { let _ = fut.as_mut().poll(cx); },
+/// |meta| my_trace_leaf(meta, &mut leaf_count),
+/// );
+/// Poll::Ready(())
+/// })).await;
+/// 
+/// assert!(leaf_count > 0);
+/// # }
+/// ```
+pub fn trace_with<FN, FT, R>(f: FN, trace_leaf: FT) -> R where FN: FnOnce, FT: FnMut {
+ let trace_leaf_dyn = (&mut trace_leaf) as &mut(dyn FnMut(&TraceMeta) + '_);
+ let trace_leaf_dyn = unsafe { std::mem::transmute::<*mut(dyn FnMut(&TraceMeta) + '_), *mut(dyn FnMut(&TraceMeta) + 'static), >(trace_leaf_dyn) };
+ let trace_leaf_dyn = unsafe { NonNull::new_unchecked(trace_leaf_dyn) };
+ let mut old_trace_leaf_fn = None;
+ unsafe { Context::try_with_current(| ctx | { old_trace_leaf_fn = ctx.trace_leaf_fn.replace(Some(trace_leaf_dyn)); }) };
+ let _restore = defer(move | | { unsafe { Context::try_with_current(| ctx | { ctx.trace_leaf_fn.set(old_trace_leaf_fn); }) }; });
+ f()
+}
+
+impl Trace {
+ fn capture(f: F) ->(R, Trace) {
+ trace_impl::capture(f)
+ }
+ 
+ fn empty() -> Self {
+ Self { backtraces: vec ! [] }
+ }
+ 
+ fn push_backtrace(&mut self, bt: Vec<BacktraceFrame>) {
+ self.backtraces.push(bt);
+ }
+ 
+ fn root(future: F) -> Root<F> {
+ Root { future }
+ }
+ 
+ fn backtraces(&self) -> &[Backtrace] {
+ &self.backtraces
+ }
+ 
+}
+
+/// If this is a sub-invocation of [`Trace::capture`], capture a backtrace.
+/// 
+/// The captured backtrace will be returned by [`Trace::capture`].
+/// 
+/// Invoking this function does nothing when it is not a sub-invocation
+/// [`Trace::capture`].
+#[inline(never)]
+fn trace_leaf(cx: &mut task::Context<'_>) -> Poll<()> {
+ let root_addr = Context::current_frame_addr();
+ let ret = Context::try_with_current_trace_leaf_fn(| leaf_fn | { let meta = TraceMeta { root_addr, trace_leaf_addr: trace_leaf as * const c_void }; leaf_fn(&meta); context::with_scheduler(| scheduler | { if let Some(scheduler) = scheduler { match scheduler { scheduler::Context::CurrentThread(s) => s.defer.defer(cx.waker()), #[cfg(feature = "rt-multi-thread")] scheduler::Context::MultiThread(s) => s.defer.defer(cx.waker()) } } }); });
+ match ret { Some(()) => Poll::Pending, None => Poll::Ready(()) }
+}
+
+impl fmt::Display for Trace {
+ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+ Tree::from_trace(self.clone()).fmt(f)
+ }
+ 
+}
+
+fn defer<F: FnOnce, R>(f: F) -> impl Drop {
+ use std::mem::ManuallyDrop;
+ struct Defer<F: FnOnce, R> {
+ (ManuallyDrop<F>),
+ }
+ 
+ impl<F: FnOnce, R> Drop for Defer<F, R> {
+ fn drop(&mut self) {
+ unsafe { ManuallyDrop::take(&mut self.0)(); }
+ }
+ 
+ }
+ 
+ Defer(ManuallyDrop::new(f))
+}
+
+impl<T: Future> Future for Root<T> {
+ type Output = T::Output;
+ fn poll(self, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+ unsafe { let mut frame = Frame { inner_addr: Self::poll as * const c_void, parent: None }; Context::with_current_frame(| current | { frame.parent = current.take(); current.set(Some(NonNull::from(&frame))); }); let _restore = defer(| | { Context::with_current_frame(| current | { current.set(frame.parent); }); }); let this = self.project(); this.future.poll(cx) }
+ }
+ 
+}
+
+/// Trace and poll all tasks of the `current_thread` runtime.
+fn trace_current_thread(owned: &OwnedTasks<Arc<current_thread::Handle>>, local: &mut VecDeque<Notified<Arc<current_thread::Handle>>>, injection: &Inject<Arc<current_thread::Handle>>) -> Vec<(Id, Trace)> {
+ let mut dequeued = Vec::new();
+ while let Some(task) = local.pop_back() { dequeued.push(task); }
+ while let Some(task) = injection.pop() { dequeued.push(task); }
+ trace_owned(owned, dequeued)
+}
+
+cfg_rt_multi_thread ! { use crate::loom::sync::Mutex; use crate::runtime::scheduler::multi_thread; use crate::runtime::scheduler::multi_thread::Synced; use crate::runtime::scheduler::inject::Shared; #[doc = " Trace and poll all tasks of the `current_thread` runtime."] #[doc = ""] #[doc = " ## Safety"] #[doc = ""] #[doc = " Must be called with the same `synced` that `injection` was created with."] pub(in crate::runtime) unsafe fn trace_multi_thread(owned: &OwnedTasks < Arc<multi_thread::Handle>>, local: &mut multi_thread::queue::Local < Arc<multi_thread::Handle>>, synced: &Mutex<Synced>, injection: &Shared < Arc<multi_thread::Handle>>) -> Vec<(Id, Trace)> { let mut dequeued = Vec::new(); while let Some(notified) = local.pop() { dequeued.push(notified); } let mut synced = synced.lock(); while let Some(notified) = unsafe { injection.pop(&mut synced.inject) } { dequeued.push(notified); } drop(synced); trace_owned(owned, dequeued) } }
+/// Trace the `OwnedTasks`.
+/// 
+/// # Preconditions
+/// 
+/// This helper presumes exclusive access to each task. The tasks must not exist
+/// in any other queue.
+fn trace_owned<S: Schedule>(owned: &OwnedTasks<S>, dequeued: Vec<Notified<S>>) -> Vec<(Id, Trace)> {
+ let mut tasks = dequeued;
+ owned.for_each(| task | { if let Some(notified) = task.notify_for_tracing() { tasks.push(notified); } });
+ tasks.into_iter().map(| task | { let local_notified = owned.assert_owner(task); let id = local_notified.task.id(); let((), trace) = Trace::capture(| | local_notified.run()); (id, trace) }).collect()
+}
+

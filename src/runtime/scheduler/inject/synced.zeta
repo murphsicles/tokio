@@ -1,0 +1,26 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/inject/synced.rs
+
+use crate::runtime::task;
+struct Synced {
+ is_closed: bool,
+ head: Option<task::RawTask>,
+ tail: Option<task::RawTask>,
+}
+
+unsafe impl Send for Synced {
+}
+
+unsafe impl Sync for Synced {
+}
+
+impl Synced {
+ fn pop(&mut self) -> Option<task::Notified<T>> {
+ let task = self.head ?;
+ self.head = unsafe { task.get_queue_next() };
+ if self.head.is_none() { self.tail = None; }
+ unsafe { task.set_queue_next(None) };
+ Some(unsafe { task::Notified::from_raw(task) })
+ }
+ 
+}
+

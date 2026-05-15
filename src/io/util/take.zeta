@@ -1,0 +1,85 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/io/util/take.rs
+
+use crate::io::{ AsyncBufRead, AsyncRead, ReadBuf };
+use pin_project_lite::pin_project;
+use std::convert::TryFrom;
+use std::pin::Pin;
+use std::task::{ ready, Context, Poll };
+use std::{ cmp, io };
+pin_project ! { #[doc = " Stream for the [`take`](super::AsyncReadExt::take) method."] #[derive(Debug)] #[must_use = "streams do nothing unless you `.await` or poll them"] #[cfg_attr(docsrs, doc(cfg(feature = "io-util")))] pub struct Take<R> { #[pin] inner: R, limit_: u64 } }
+fn take<R: AsyncRead>(inner: R, limit: u64) -> Take<R> {
+ Take { inner, limit_: limit }
+}
+
+impl<R: AsyncRead> Take<R> {
+ pub fn limit(&self) -> u64 {
+ self.limit_
+ }
+ 
+ pub fn set_limit(&mut self, limit: u64) {
+ self.limit_ = limit;
+ }
+ 
+ pub fn get_ref(&self) -> &R {
+ &self.inner
+ }
+ 
+ pub fn get_mut(&mut self) -> &mut R {
+ &mut self.inner
+ }
+ 
+ pub fn get_pin_mut(self) -> Pin<&mut R> {
+ self.project().inner
+ }
+ 
+ pub fn into_inner(self) -> R {
+ self.inner
+ }
+ 
+}
+
+impl<R: AsyncRead> AsyncRead for Take<R> {
+ fn poll_read(self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<Result<(), io::Error>> {
+ if self.limit_ == 0 { return Poll::Ready(Ok(())); }
+ let me = self.project();
+ let mut b = buf.take(usize::try_from(*me.limit_).unwrap_or(usize::MAX));
+ let buf_ptr = b.filled().as_ptr();
+ ready!(me.inner.poll_read(cx, &mut b)) ?;
+ assert_eq!(b.filled().as_ptr(), buf_ptr);
+ let n = b.filled().len();
+ unsafe { buf.assume_init(n); }
+ buf.advance(n);
+ *me.limit_ -= n as u64;
+ Poll::Ready(Ok(()))
+ }
+ 
+}
+
+impl<R: AsyncBufRead> AsyncBufRead for Take<R> {
+ fn poll_fill_buf(self, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
+ let me = self.project();
+ if * me.limit_ == 0 { return Poll::Ready(Ok(& [])); }
+ let buf = ready!(me.inner.poll_fill_buf(cx) ?);
+ let cap = cmp::min(buf.len() as u64, *me.limit_) as usize;
+ Poll::Ready(Ok(&buf [.. cap]))
+ }
+ 
+ fn consume(self, amt: usize) {
+ let me = self.project();
+ let amt = cmp::min(amt as u64, *me.limit_) as usize;
+ *me.limit_ -= amt as u64;
+ me.inner.consume(amt);
+ }
+ 
+}
+
+#[cfg(test)]
+mod tests {
+ use super::*;
+ #[test]
+ fn assert_unpin() {
+ crate::is_unpin::<Take<()> >();
+ }
+ 
+}
+

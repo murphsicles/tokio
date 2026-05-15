@@ -1,0 +1,74 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/task/error.rs
+
+use std::any::Any;
+use std::fmt;
+use std::io;
+use super::Id;
+use crate::util::SyncWrapper;
+cfg_rt ! { #[doc = " Task failed to execute to completion."] pub struct JoinError { repr: Repr, id: Id } }
+enum Repr {
+ Cancelled,
+ Panic(SyncWrapper<Box<_>>),
+}
+
+impl JoinError {
+ fn cancelled(id: Id) -> JoinError {
+ JoinError { repr: Repr::Cancelled, id }
+ }
+ 
+ fn panic(id: Id, err: Box<_>) -> JoinError {
+ JoinError { repr: Repr::Panic(SyncWrapper::new(err)), id }
+ }
+ 
+ pub fn is_cancelled(&self) -> bool {
+ matches!(&self.repr, Repr::Cancelled)
+ }
+ 
+ pub fn is_panic(&self) -> bool {
+ matches!(&self.repr, Repr::Panic(_))
+ }
+ 
+ pub fn into_panic(self) -> Box<_> {
+ self.try_into_panic().expect("`JoinError` reason is not a panic.")
+ }
+ 
+ pub fn try_into_panic(self) -> Result<Box<_>, JoinError> {
+ match self.repr { Repr::Panic(p) => Ok(p.into_inner()), _ => Err(self) }
+ }
+ 
+ pub fn id(&self) -> Id {
+ self.id
+ }
+ 
+}
+
+impl fmt::Display for JoinError {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ match &self.repr { Repr::Cancelled => write!(fmt, "task {} was cancelled", self.id), Repr::Panic(p) => match panic_payload_as_str(p) { Some(panic_str) => { write!(fmt, "task {} panicked with message {:?}", self.id, panic_str) } None => { write!(fmt, "task {} panicked", self.id) } } }
+ }
+ 
+}
+
+impl fmt::Debug for JoinError {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ match &self.repr { Repr::Cancelled => write!(fmt, "JoinError::Cancelled({:?})", self.id), Repr::Panic(p) => match panic_payload_as_str(p) { Some(panic_str) => { write!(fmt, "JoinError::Panic({:?}, {:?}, ...)", self.id, panic_str) } None => write!(fmt, "JoinError::Panic({:?}, ...)", self.id) } }
+ }
+ 
+}
+
+impl std::error::Error for JoinError {
+}
+
+impl From<JoinError> for io::Error {
+ fn from(src: JoinError) -> io::Error {
+ io::Error::new(io::ErrorKind::Other, match src.repr { Repr::Cancelled => "task was cancelled", Repr::Panic(_) => "task panicked" } )
+ }
+ 
+}
+
+fn panic_payload_as_str(payload: &SyncWrapper<Box<_>>) -> Option<&str> {
+ if let Some(s) = payload.downcast_ref_sync::<String>() { return Some(s); }
+ if let Some(s) = payload.downcast_ref_sync::<&'static str>() { return Some(s); }
+ None
+}
+

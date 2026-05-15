@@ -1,0 +1,54 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/io/async_seek.rs
+
+use std::io::{ self, SeekFrom };
+use std::ops::DerefMut;
+use std::pin::Pin;
+use std::task::{ Context, Poll };
+/// Seek bytes asynchronously.
+/// 
+/// This trait is analogous to the [`std::io::Seek`] trait, but integrates
+/// with the asynchronous task system. In particular, the `start_seek`
+/// method, unlike [`Seek::seek`], will not block the calling thread.
+/// 
+/// Utilities for working with `AsyncSeek` values are provided by
+/// [`AsyncSeekExt`].
+/// 
+/// [`std::io::Seek`]: std::io::Seek
+/// [`Seek::seek`]: std::io::Seek::seek()
+/// [`AsyncSeekExt`]: crate::io::AsyncSeekExt
+pub trait AsyncSeek {
+ fn start_seek(self, position: SeekFrom) -> io::Result<()>;
+ fn poll_complete(self, cx: &mut Context<'_>) -> Poll<io::Result<u64>>
+}
+
+macro_rules ! deref_async_seek { () => { fn start_seek(mut self: Pin <&mut Self>, pos: SeekFrom) -> io::Result<()> { Pin::new(&mut **self).start_seek(pos) } fn poll_complete(mut self: Pin <&mut Self>, cx: &mut Context <'_ >) -> Poll < io::Result<u64>> { Pin::new(&mut **self).poll_complete(cx) } }; }
+impl<T: Sized + AsyncSeek + Unpin> AsyncSeek for Box<T> {
+ // [unsupported impl item]
+}
+
+impl<T: Sized + AsyncSeek + Unpin> AsyncSeek for &mut T {
+ // [unsupported impl item]
+}
+
+impl<P> AsyncSeek for Pin<P> where P: DerefMut, P::Target: AsyncSeek {
+ fn start_seek(self, pos: SeekFrom) -> io::Result<()> {
+ crate::util::pin_as_deref_mut(self).start_seek(pos)
+ }
+ 
+ fn poll_complete(self, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
+ crate::util::pin_as_deref_mut(self).poll_complete(cx)
+ }
+ 
+}
+
+impl<T: AsRef<[u8]> + Unpin> AsyncSeek for io::Cursor<T> {
+ fn start_seek(self, pos: SeekFrom) -> io::Result<()> {
+ io::Seek::seek(&mut * self, pos).map(drop)
+ }
+ 
+ fn poll_complete(self, _: &mut Context<'_>) -> Poll<io::Result<u64>> {
+ Poll::Ready(Ok(self.get_mut().position()))
+ }
+ 
+}
+

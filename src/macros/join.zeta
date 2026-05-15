@@ -1,0 +1,58 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/macros/join.rs
+
+macro_rules ! doc { ($ join: item) => { #[doc = " Waits on multiple concurrent branches, returning when **all**branches"] #[doc = " complete."] #[doc = ""] #[doc = " The `join!` macro must be used inside of async functions, closures, and"] #[doc = " blocks."] #[doc = ""] #[doc = " The `join!` macro takes a list of async expressions and evaluates them"] #[doc = " concurrently on the same task. Each async expression evaluates to a future"] #[doc = " and the futures from each expression are multiplexed on the current task."] #[doc = ""] #[doc = " When working with async expressions returning `Result`, `join!` will wait"] #[doc = " for **all**branches complete regardless if any complete with `Err`. Use"] #[doc = " [`try_join!`] to return early when `Err` is encountered."] #[doc = ""] #[doc = " [`try_join!`]: crate::try_join"] #[doc = ""] #[doc = " # Notes"] #[doc = ""] #[doc = " The supplied futures are stored inline and do not require allocating a"] #[doc = " `Vec`."] #[doc = ""] #[doc = " ## Runtime characteristics"] #[doc = ""] #[doc = " By running all async expressions on the current task, the expressions are"] #[doc = " able to run **concurrently**but not in **parallel**. This means all"] #[doc = " expressions are run on the same thread and if one branch blocks the thread,"] #[doc = " all other expressions will be unable to continue. If parallelism is"] #[doc = " required, spawn each async expression using [`tokio::spawn`] and pass the"] #[doc = " join handle to `join!`."] #[doc = ""] #[doc = " [`tokio::spawn`]: crate::spawn"] #[doc = ""] #[doc = " ## Fairness"] #[doc = ""] #[doc = " By default, `join!`'s generated future rotates which contained"] #[doc = " future is polled first whenever it is woken."] #[doc = ""] #[doc = " This behavior can be overridden by adding `biased;` to the beginning of the"] #[doc = " macro usage. See the examples for details. This will cause `join` to poll"] #[doc = " the futures in the order they appear from top to bottom."] #[doc = ""] #[doc = " You may want this if your futures may interact in a way where known polling order is significant."] #[doc = ""] #[doc = " But there is an important caveat to this mode. It becomes your responsibility"] #[doc = " to ensure that the polling order of your futures is fair. If for example you"] #[doc = " are joining a stream and a shutdown future, and the stream has a"] #[doc = " huge volume of messages that takes a long time to finish processing per poll, you should"] #[doc = " place the shutdown future earlier in the `join!` list to ensure that it is"] #[doc = " always polled, and will not be delayed due to the stream future taking a long time to return"] #[doc = " `Poll::Pending`."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " Basic join with two branches"] #[doc = ""] #[doc = " ```"] #[doc = " async fn do_stuff_async() {"] #[doc = " // async work"] #[doc = " }"] #[doc = ""] #[doc = " async fn more_async_work() {"] #[doc = " // more here"] #[doc = " }"] #[doc = ""] #[doc = " # #[tokio::main(flavor = \"current_thread\")]"] #[doc = " # async fn main() {"] #[doc = " let(first, second) = tokio::join!("] #[doc = " do_stuff_async(),"] #[doc = " more_async_work());"] #[doc = ""] #[doc = " // do something with the values"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " Using the `biased;` mode to control polling order."] #[doc = ""] #[doc = " ```"] #[doc = " # #[cfg(not(target_family = \"wasm\"))]"] #[doc = " # {"] #[doc = " async fn do_stuff_async() {"] #[doc = " // async work"] #[doc = " }"] #[doc = ""] #[doc = " async fn more_async_work() {"] #[doc = " // more here"] #[doc = " }"] #[doc = ""] #[doc = " # #[tokio::main(flavor = \"current_thread\")]"] #[doc = " # async fn main() {"] #[doc = " let(first, second) = tokio::join!("] #[doc = " biased;"] #[doc = " do_stuff_async(),"] #[doc = " more_async_work()"] #[doc = " );"] #[doc = ""] #[doc = " // do something with the values"] #[doc = " # }"] #[doc = " # }"] #[doc = " ```"] #[macro_export] #[cfg_attr(docsrs, doc(cfg(feature = "macros")))] $ join }; }
+#[cfg(doc)] doc ! { macro_rules ! join { ($ (biased;) ? $ ($ future: expr) ,*) => { unimplemented!() } } }
+#[cfg(not(doc))] doc ! { macro_rules ! join { (@ { rotator_select =$ rotator_select: ty; ($ ($ count: tt) *)($ ($ total: tt) *) $ (($ ($ skip: tt) *) $ e: expr ) * }) => { { let mut futures = ($ ($ crate::macros::support::maybe_done($ e) ) *); let mut futures = &mut futures; let mut rotator = <$ rotator_select as $ crate::macros::support::RotatorSelect >::Rotator::<{ $ ($ total) * }>::default(); $ crate::macros::support::poll_fn(move | cx | { const COUNT: u32 = $ ($ total) *; let mut is_pending = false; let mut to_run = COUNT; let mut skip = rotator.num_skip(); loop { $ (if skip == 0 { if to_run == 0 { break; } to_run -= 1; let($ ($ skip ) * fut, ..) = &mut * futures; let mut fut = unsafe { $ crate::macros::support::Pin::new_unchecked(fut) }; if $ crate::macros::support::Future::poll(fut.as_mut(), cx).is_pending() { is_pending = true; } } else { skip -= 1; }) * } if is_pending { $ crate::macros::support::Poll::Pending } else { $ crate::macros::support::Poll::Ready(($ ({ let($ ($ skip ) * fut, ..) = &mut futures; let mut fut = unsafe { $ crate::macros::support::Pin::new_unchecked(fut) }; fut.take_output().expect("expected completed future") } ) *)) } }).await } }; (@ { rotator_select =$ rotator_select: ty; ($ ($ s: tt) *)($ ($ n: tt) *) $ ($ t: tt) * } $ e: expr, $ ($ r: tt) *) => { $ crate::join!(@ { rotator_select =$ rotator_select; ($ ($ s) * _)($ ($ n) * + 1) $ ($ t) * ($ ($ s) *) $ e } $ ($ r) *) }; (biased; $ ($ e: expr) ,+ $ () ?) => { $ crate::join!(@ { rotator_select =$ crate::macros::support::SelectBiased; ()(0) } $ ($ e ) *) }; ($ ($ e: expr) ,+ $ () ?) => { $ crate::join!(@ { rotator_select =$ crate::macros::support::SelectNormal; ()(0) } $ ($ e ) *) }; (biased;) => { async { } . await }; () => { async { } . await } } }
+/// Helper trait to select which type of `Rotator` to use.
+pub trait RotatorSelect {
+ type Rotator
+}
+
+/// Marker type indicating that the starting branch should
+/// rotate each poll.
+#[derive(Debug)]
+pub struct SelectNormal {
+}
+
+/// Marker type indicating that the starting branch should
+/// be the first declared branch each poll.
+#[derive(Debug)]
+pub struct SelectBiased {
+}
+
+impl RotatorSelect for SelectNormal {
+ type Rotator = Rotator<COUNT>
+}
+
+impl RotatorSelect for SelectBiased {
+ type Rotator = BiasedRotator
+}
+
+/// Rotates by one each [`Self::num_skip`] call up to COUNT - 1.
+#[derive(Default, Debug)]
+pub struct Rotator<const COUNT: u32> {
+ next: u32,
+}
+
+impl<const COUNT: u32> Rotator<COUNT> {
+ pub fn num_skip(&mut self) -> u32 {
+ let num_skip = self.next;
+ self.next += 1;
+ if self.next == COUNT { self.next = 0; }
+ num_skip
+ }
+ 
+}
+
+/// [`Self::num_skip`] always returns 0.
+#[derive(Default, Debug)]
+pub struct BiasedRotator {
+}
+
+impl BiasedRotator {
+ pub fn num_skip(&mut self) -> u32 {
+ 0
+ }
+ 
+}
+

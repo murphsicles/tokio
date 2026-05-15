@@ -1,0 +1,31 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/blocking/task.rs
+
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{ Context, Poll };
+/// Converts a function to a future that completes on poll.
+struct BlockingTask<T> {
+ func: Option<T>,
+}
+
+impl<T> BlockingTask<T> {
+ fn new(func: T) -> BlockingTask<T> {
+ BlockingTask { func: Some(func) }
+ }
+ 
+}
+
+impl<T> Unpin for BlockingTask<T> {
+}
+
+impl<T, R> Future for BlockingTask<T> where T: FnOnce + Send + static, R: Send + static {
+ type Output = R;
+ fn poll(self, _cx: &mut Context<'_>) -> Poll<R> {
+ let me = &mut * self;
+ let func = me.func.take().expect("[internal exception] blocking task ran twice.");
+ crate::task::coop::stop();
+ Poll::Ready(func())
+ }
+ 
+}
+

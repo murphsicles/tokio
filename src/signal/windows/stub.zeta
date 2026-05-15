@@ -1,0 +1,24 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/signal/windows/stub.rs
+
+use crate::signal::RxFuture;
+use std::io;
+fn ctrl_break() -> io::Result<RxFuture> {
+ panic!()
+}
+
+fn ctrl_close() -> io::Result<RxFuture> {
+ panic!()
+}
+
+fn ctrl_c() -> io::Result<RxFuture> {
+ panic!()
+}
+
+fn ctrl_logoff() -> io::Result<RxFuture> {
+ panic!()
+}
+
+fn ctrl_shutdown() -> io::Result<RxFuture> {
+ panic!()
+}
+

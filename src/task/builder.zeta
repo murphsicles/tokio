@@ -1,0 +1,106 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/task/builder.rs
+
+use crate::{ runtime::{ Handle, BOX_FUTURE_THRESHOLD }, task::{ JoinHandle, LocalSet }, util::trace::SpawnMeta };
+use std::{ future::Future, io, mem };
+/// Factory which is used to configure the properties of a new task.
+/// 
+/// **Note**: This is an [unstable API][unstable]. The public API of this type
+/// may break in 1.x releases. See [the documentation on unstable
+/// features][unstable] for details.
+/// 
+/// Methods can be chained in order to configure it.
+/// 
+/// Currently, there is only one configuration option:
+/// 
+/// - [`name`], which specifies an associated name for
+/// the task
+/// 
+/// There are three types of task that can be spawned from a Builder:
+/// - [`spawn_local`] for executing not [`Send`] futures
+/// - [`spawn`] for executing [`Send`] futures on the runtime
+/// - [`spawn_blocking`] for executing blocking code in the
+/// blocking thread pool.
+/// 
+/// ## Example
+/// 
+/// ```no_run
+/// use tokio::net::{TcpListener, TcpStream};
+/// 
+/// use std::io;
+/// 
+/// async fn process(socket: TcpStream) {
+/// // ...
+/// # drop(socket);
+/// }
+/// 
+/// #[tokio::main]
+/// async fn main() -> io::Result<()> {
+/// let listener = TcpListener::bind("127.0.0.1:8080").await?;
+/// 
+/// loop {
+/// let(socket, _) = listener.accept().await?;
+/// 
+/// tokio::task::Builder::new()
+/// .name("tcp connection handler")
+/// .spawn(async move {
+/// // Process each socket concurrently.
+/// process(socket).await
+/// })?;
+/// }
+/// }
+/// ```
+/// [unstable]: crate#unstable-features
+/// [`name`]: Builder::name
+/// [`spawn_local`]: Builder::spawn_local
+/// [`spawn`]: Builder::spawn
+/// [`spawn_blocking`]: Builder::spawn_blocking
+#[derive(Default, Debug)]
+#[cfg_attr(docsrs, doc(cfg(all(tokio_unstable, feature = "tracing"))))]
+pub struct Builder<a> {
+ name: Option<&str>,
+}
+
+impl<a> Builder<'a> {
+ pub fn new() -> Self {
+ Self::default()
+ }
+ 
+ pub fn name(&self, name: &str) -> Self {
+ Self { name: Some(name) }
+ }
+ 
+ pub fn spawn(self, future: Fut) -> io::Result<JoinHandle<Fut::Output>> {
+ let fut_size = mem::size_of::<Fut>();
+ Ok(if fut_size > BOX_FUTURE_THRESHOLD { super::spawn::spawn_inner(Box::pin(future), SpawnMeta::new(self.name, fut_size)) } else { super::spawn::spawn_inner(future, SpawnMeta::new(self.name, fut_size)) })
+ }
+ 
+ pub fn spawn_on(self, future: Fut, handle: &Handle) -> io::Result<JoinHandle<Fut::Output>> {
+ let fut_size = mem::size_of::<Fut>();
+ Ok(if fut_size > BOX_FUTURE_THRESHOLD { handle.spawn_named(Box::pin(future), SpawnMeta::new(self.name, fut_size)) } else { handle.spawn_named(future, SpawnMeta::new(self.name, fut_size)) })
+ }
+ 
+ pub fn spawn_local(self, future: Fut) -> io::Result<JoinHandle<Fut::Output>> {
+ let fut_size = mem::size_of::<Fut>();
+ Ok(if fut_size > BOX_FUTURE_THRESHOLD { super::local::spawn_local_inner(Box::pin(future), SpawnMeta::new(self.name, fut_size)) } else { super::local::spawn_local_inner(future, SpawnMeta::new(self.name, fut_size)) })
+ }
+ 
+ pub fn spawn_local_on(self, future: Fut, local_set: &LocalSet) -> io::Result<JoinHandle<Fut::Output>> {
+ let fut_size = mem::size_of::<Fut>();
+ Ok(if fut_size > BOX_FUTURE_THRESHOLD { local_set.spawn_named(Box::pin(future), SpawnMeta::new(self.name, fut_size)) } else { local_set.spawn_named(future, SpawnMeta::new(self.name, fut_size)) })
+ }
+ 
+ pub fn spawn_blocking(self, function: Function) -> io::Result<JoinHandle<Output>> {
+ let handle = Handle::current();
+ self.spawn_blocking_on(function, &handle)
+ }
+ 
+ pub fn spawn_blocking_on(self, function: Function, handle: &Handle) -> io::Result<JoinHandle<Output>> {
+ use crate::runtime::Mandatory;
+ let fn_size = mem::size_of::<Function>();
+ let _ = if fn_size > BOX_FUTURE_THRESHOLD { handle.inner.blocking_spawner().spawn_blocking_inner(Box::new(function), Mandatory::NonMandatory, SpawnMeta::new(self.name, fn_size), handle ) } else { handle.inner.blocking_spawner().spawn_blocking_inner(function, Mandatory::NonMandatory, SpawnMeta::new(self.name, fn_size), handle ) };
+ spawn_result ?;
+ Ok(join_handle)
+ }
+ 
+}
+

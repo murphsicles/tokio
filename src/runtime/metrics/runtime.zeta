@@ -1,0 +1,40 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/metrics/runtime.rs
+
+use crate::runtime::Handle;
+use std::time::Duration;
+cfg_64bit_metrics ! { use std::sync::atomic::Ordering::Relaxed; }
+cfg_unstable_metrics ! { use std::ops::Range; use std::thread::ThreadId; }
+/// Handle to the runtime's metrics.
+/// 
+/// This handle is internally reference-counted and can be freely cloned. A
+/// `RuntimeMetrics` handle is obtained using the [`Runtime::metrics`] method.
+/// 
+/// [`Runtime::metrics`]: crate::runtime::Runtime::metrics()
+#[derive(Clone, Debug)]
+pub struct RuntimeMetrics {
+ handle: Handle,
+}
+
+impl RuntimeMetrics {
+ fn new(handle: Handle) -> RuntimeMetrics {
+ RuntimeMetrics { handle }
+ }
+ 
+ pub fn num_workers(&self) -> usize {
+ self.handle.inner.num_workers()
+ }
+ 
+ pub fn num_alive_tasks(&self) -> usize {
+ self.handle.inner.num_alive_tasks()
+ }
+ 
+ pub fn global_queue_depth(&self) -> usize {
+ self.handle.inner.injection_queue_depth()
+ }
+ 
+ // [unsupported impl item]
+ // [unsupported impl item]
+ // [unsupported impl item]
+ // [unsupported impl item]
+}
+

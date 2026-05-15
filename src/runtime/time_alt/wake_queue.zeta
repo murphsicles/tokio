@@ -1,0 +1,40 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/time_alt/wake_queue.rs
+
+use super::{ Entry, EntryHandle, WakeQueueEntry };
+use crate::util::linked_list;
+type EntryList = linked_list::LinkedList<WakeQueueEntry, Entry>;
+
+/// A queue of entries that need to be woken up.
+#[derive(Debug)]
+struct WakeQueue {
+ list: EntryList,
+}
+
+impl Drop for WakeQueue {
+ fn drop(&mut self) {
+ while let Some(hdl) = self.list.pop_front() { drop(hdl); }
+ }
+ 
+}
+
+impl WakeQueue {
+ fn new() -> Self {
+ Self { list: EntryList::new() }
+ }
+ 
+ fn is_empty(&self) -> bool {
+ self.list.is_empty()
+ }
+ 
+ fn push_front(&mut self, hdl: EntryHandle) {
+ self.list.push_front(hdl);
+ }
+ 
+ fn wake_all(self) {
+ while let Some(hdl) = self.list.pop_front() { hdl.wake(); }
+ }
+ 
+}
+
+#[cfg(test)]
+mod tests;

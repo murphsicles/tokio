@@ -1,0 +1,195 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/io/async_write.rs
+
+use std::io::{ self, IoSlice };
+use std::ops::DerefMut;
+use std::pin::Pin;
+use std::task::{ Context, Poll };
+/// Writes bytes asynchronously.
+/// 
+/// This trait is analogous to the [`std::io::Write`] trait, but integrates with
+/// the asynchronous task system. In particular, the [`poll_write`] method,
+/// unlike [`Write::write`], will automatically queue the current task for wakeup
+/// and return if data is not yet available, rather than blocking the calling
+/// thread.
+/// 
+/// Specifically, this means that the [`poll_write`] function will return one of
+/// the following:
+/// 
+/// * `Poll::Ready(Ok(n))` means that `n` bytes of data was immediately
+/// written.
+/// 
+/// * `Poll::Pending` means that no data was written from the buffer
+/// provided. The I/O object is not currently writable but may become writable
+/// in the future. Most importantly, **the current future's task is scheduled
+/// to get unparked when the object is writable**. This means that like
+/// `Future::poll` you'll receive a notification when the I/O object is
+/// writable again.
+/// 
+/// * `Poll::Ready(Err(e))` for other errors are standard I/O errors coming from the
+/// underlying object.
+/// 
+/// Utilities for working with `AsyncWrite` values are provided by
+/// [`AsyncWriteExt`]. Most users will interact with `AsyncWrite` types through
+/// these extension methods, which provide ergonomic async functions such as
+/// `write_all` and `flush`.
+/// 
+/// [`std::io::Write`]: std::io::Write
+/// [`Write::write`]: std::io::Write::write()
+/// [`poll_write`]: AsyncWrite::poll_write()
+/// [`AsyncWriteExt`]: crate::io::AsyncWriteExt
+pub trait AsyncWrite {
+ fn poll_write(self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>>;
+ fn poll_flush(self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
+ fn poll_shutdown(self, cx: &mut Context<'_>) -> Poll<io::Result<()>>;
+ fn poll_write_vectored(self, cx: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>>;
+ fn is_write_vectored(&self) -> bool
+}
+
+macro_rules ! deref_async_write { () => { fn poll_write(mut self: Pin <&mut Self>, cx: &mut Context <'_ >, buf: & [u8] ) -> Poll < io::Result<usize>> { Pin::new(&mut **self).poll_write(cx, buf) } fn poll_write_vectored(mut self: Pin <&mut Self>, cx: &mut Context <'_ >, bufs: & [IoSlice <'_ >] ) -> Poll < io::Result<usize>> { Pin::new(&mut **self).poll_write_vectored(cx, bufs) } fn is_write_vectored(&self) -> bool { (**self).is_write_vectored() } fn poll_flush(mut self: Pin <&mut Self>, cx: &mut Context <'_ >) -> Poll < io::Result<()>> { Pin::new(&mut **self).poll_flush(cx) } fn poll_shutdown(mut self: Pin <&mut Self>, cx: &mut Context <'_ >) -> Poll < io::Result<()>> { Pin::new(&mut **self).poll_shutdown(cx) } }; }
+impl<T: Sized + AsyncWrite + Unpin> AsyncWrite for Box<T> {
+ // [unsupported impl item]
+}
+
+impl<T: Sized + AsyncWrite + Unpin> AsyncWrite for &mut T {
+ // [unsupported impl item]
+}
+
+impl<P> AsyncWrite for Pin<P> where P: DerefMut, P::Target: AsyncWrite {
+ fn poll_write(self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ crate::util::pin_as_deref_mut(self).poll_write(cx, buf)
+ }
+ 
+ fn poll_write_vectored(self, cx: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ crate::util::pin_as_deref_mut(self).poll_write_vectored(cx, bufs)
+ }
+ 
+ fn is_write_vectored(&self) -> bool {
+ (* *self).is_write_vectored()
+ }
+ 
+ fn poll_flush(self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ crate::util::pin_as_deref_mut(self).poll_flush(cx)
+ }
+ 
+ fn poll_shutdown(self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ crate::util::pin_as_deref_mut(self).poll_shutdown(cx)
+ }
+ 
+}
+
+impl AsyncWrite for Vec<u8> {
+ fn poll_write(self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ self.get_mut().extend_from_slice(buf);
+ Poll::Ready(Ok(buf.len()))
+ }
+ 
+ fn poll_write_vectored(self, _: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ Poll::Ready(io::Write::write_vectored(&mut * self, bufs))
+ }
+ 
+ fn is_write_vectored(&self) -> bool {
+ true
+ }
+ 
+ fn poll_flush(self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(Ok(()))
+ }
+ 
+ fn poll_shutdown(self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(Ok(()))
+ }
+ 
+}
+
+impl AsyncWrite for io::Cursor<&mut [u8]> {
+ fn poll_write(self, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ Poll::Ready(io::Write::write(&mut * self, buf))
+ }
+ 
+ fn poll_write_vectored(self, _: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ Poll::Ready(io::Write::write_vectored(&mut * self, bufs))
+ }
+ 
+ fn is_write_vectored(&self) -> bool {
+ true
+ }
+ 
+ fn poll_flush(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(io::Write::flush(&mut * self))
+ }
+ 
+ fn poll_shutdown(self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.poll_flush(cx)
+ }
+ 
+}
+
+impl AsyncWrite for io::Cursor<&mut Vec<u8>> {
+ fn poll_write(self, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ Poll::Ready(io::Write::write(&mut * self, buf))
+ }
+ 
+ fn poll_write_vectored(self, _: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ Poll::Ready(io::Write::write_vectored(&mut * self, bufs))
+ }
+ 
+ fn is_write_vectored(&self) -> bool {
+ true
+ }
+ 
+ fn poll_flush(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(io::Write::flush(&mut * self))
+ }
+ 
+ fn poll_shutdown(self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.poll_flush(cx)
+ }
+ 
+}
+
+impl AsyncWrite for io::Cursor<Vec<u8>> {
+ fn poll_write(self, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ Poll::Ready(io::Write::write(&mut * self, buf))
+ }
+ 
+ fn poll_write_vectored(self, _: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ Poll::Ready(io::Write::write_vectored(&mut * self, bufs))
+ }
+ 
+ fn is_write_vectored(&self) -> bool {
+ true
+ }
+ 
+ fn poll_flush(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(io::Write::flush(&mut * self))
+ }
+ 
+ fn poll_shutdown(self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.poll_flush(cx)
+ }
+ 
+}
+
+impl AsyncWrite for io::Cursor<Box<[u8]>> {
+ fn poll_write(self, _: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ Poll::Ready(io::Write::write(&mut * self, buf))
+ }
+ 
+ fn poll_write_vectored(self, _: &mut Context<'_>, bufs: &[IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ Poll::Ready(io::Write::write_vectored(&mut * self, bufs))
+ }
+ 
+ fn is_write_vectored(&self) -> bool {
+ true
+ }
+ 
+ fn poll_flush(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(io::Write::flush(&mut * self))
+ }
+ 
+ fn poll_shutdown(self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.poll_flush(cx)
+ }
+ 
+}
+

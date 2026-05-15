@@ -1,0 +1,36 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/time_alt/context.rs
+
+use super::{ cancellation_queue, RegistrationQueue, Wheel };
+/// Local context for the time driver, used when the runtime wants to
+/// fire/cancel timers.
+struct LocalContext {
+ wheel: Wheel,
+ registration_queue: RegistrationQueue,
+ canc_tx: cancellation_queue::Sender,
+ canc_rx: cancellation_queue::Receiver,
+}
+
+impl LocalContext {
+ fn new() -> Self {
+ let _ = cancellation_queue::new();
+ Self { wheel: Wheel::new(), registration_queue: RegistrationQueue::new(), canc_tx, canc_rx }
+ }
+ 
+}
+
+enum TempLocalContext<a> {
+ Running { registration_queue: &mut RegistrationQueue, elapsed: u64 },
+ Shutdown,
+}
+
+impl<a> TempLocalContext<'a> {
+ fn new_running(cx: &mut LocalContext) -> Self {
+ TempLocalContext::Running { registration_queue: &mut cx.registration_queue, elapsed: cx.wheel.elapsed() }
+ }
+ 
+ fn new_shutdown() -> Self {
+ TempLocalContext::Shutdown
+ }
+ 
+}
+

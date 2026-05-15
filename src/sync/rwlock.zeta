@@ -1,0 +1,307 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/sync/rwlock.rs
+
+use crate::sync::batch_semaphore::{ Semaphore, TryAcquireError };
+use crate::sync::mutex::TryLockError;
+#[cfg(all(tokio_unstable, feature = "tracing"))] use crate::util::trace;
+use std::cell::UnsafeCell;
+use std::marker;
+use std::marker::PhantomData;
+use std::sync::Arc;
+mod owned_read_guard;
+mod owned_write_guard;
+mod owned_write_guard_mapped;
+mod read_guard;
+mod write_guard;
+mod write_guard_mapped;
+pub(crate) use owned_read_guard::OwnedRwLockReadGuard;
+pub(crate) use owned_write_guard::OwnedRwLockWriteGuard;
+pub(crate) use owned_write_guard_mapped::OwnedRwLockMappedWriteGuard;
+pub(crate) use read_guard::RwLockReadGuard;
+pub(crate) use write_guard::RwLockWriteGuard;
+pub(crate) use write_guard_mapped::RwLockMappedWriteGuard;
+const MAX_READS: u32 = u32::MAX>> 3;
+
+const MAX_READS: u32 = 10;
+
+/// An asynchronous reader-writer lock.
+/// 
+/// This type of lock allows a number of readers or at most one writer at any
+/// point in time. The write portion of this lock typically allows modification
+/// of the underlying data(exclusive access) and the read portion of this lock
+/// typically allows for read-only access(shared access).
+/// 
+/// In comparison, a [`Mutex`] does not distinguish between readers or writers
+/// that acquire the lock, therefore causing any tasks waiting for the lock to
+/// become available to yield. An `RwLock` will allow any number of readers to
+/// acquire the lock as long as a writer is not holding the lock.
+/// 
+/// The priority policy of Tokio's read-write lock is _fair_(or
+/// [_write-preferring_]), in order to ensure that readers cannot starve
+/// writers. Fairness is ensured using a first-in, first-out queue for the tasks
+/// awaiting the lock; a read lock will not be given out until all write lock
+/// requests that were queued before it have been acquired and released. This is
+/// in contrast to the Rust standard library's `std::sync::RwLock`, where the
+/// priority policy is dependent on the operating system's implementation.
+/// 
+/// The type parameter `T` represents the data that this lock protects. It is
+/// required that `T` satisfies [`Send`] to be shared across threads. The RAII guards
+/// returned from the locking methods implement [`Deref`](trait@std::ops::Deref)
+/// (and [`DerefMut`](trait@std::ops::DerefMut)
+/// for the `write` methods) to allow access to the content of the lock.
+/// 
+/// # Examples
+/// 
+/// ```
+/// use tokio::sync::RwLock;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let lock = RwLock::new(5);
+/// 
+/// // many reader locks can be held at once
+/// {
+/// let r1 = lock.read().await;
+/// let r2 = lock.read().await;
+/// assert_eq!(*r1, 5);
+/// assert_eq!(*r2, 5);
+/// } // read locks are dropped at this point
+/// 
+/// // only one write lock may be held, however
+/// {
+/// let mut w = lock.write().await;
+/// *w += 1;
+/// assert_eq!(*w, 6);
+/// } // write lock is dropped here
+/// # }
+/// ```
+/// 
+/// [`Mutex`]: struct@super::Mutex
+/// [`RwLock`]: struct@RwLock
+/// [`RwLockReadGuard`]: struct@RwLockReadGuard
+/// [`RwLockWriteGuard`]: struct@RwLockWriteGuard
+/// [`Send`]: trait@std::marker::Send
+/// [_write-preferring_]: https://en.wikipedia.org/wiki/Readers%E2%80%93writer_lock#Priority_policies
+pub struct RwLock<T: Sized> {
+ resource_span: tracing::Span,
+ mr: u32,
+ s: Semaphore,
+ c: UnsafeCell<T>,
+}
+
+#[test]
+#[cfg(not(loom))]
+fn bounds() {
+ fn check_send<T: Send>() {
+ }
+ 
+ fn check_sync<T: Sync>() {
+ }
+ 
+ fn check_unpin<T: Unpin>() {
+ }
+ 
+ fn check_send_sync_val<T: Send + Sync>(_t: T) {
+ }
+ 
+ check_send::<RwLock<u32> >();
+ check_sync::<RwLock<u32> >();
+ check_unpin::<RwLock<u32> >();
+ check_send::<RwLockReadGuard<'_, u32> >();
+ check_sync::<RwLockReadGuard<'_, u32> >();
+ check_unpin::<RwLockReadGuard<'_, u32> >();
+ check_send::<OwnedRwLockReadGuard<u32, i32> >();
+ check_sync::<OwnedRwLockReadGuard<u32, i32> >();
+ check_unpin::<OwnedRwLockReadGuard<u32, i32> >();
+ check_send::<RwLockWriteGuard<'_, u32> >();
+ check_sync::<RwLockWriteGuard<'_, u32> >();
+ check_unpin::<RwLockWriteGuard<'_, u32> >();
+ check_send::<RwLockMappedWriteGuard<'_, u32> >();
+ check_sync::<RwLockMappedWriteGuard<'_, u32> >();
+ check_unpin::<RwLockMappedWriteGuard<'_, u32> >();
+ check_send::<OwnedRwLockWriteGuard<u32> >();
+ check_sync::<OwnedRwLockWriteGuard<u32> >();
+ check_unpin::<OwnedRwLockWriteGuard<u32> >();
+ check_send::<OwnedRwLockMappedWriteGuard<u32, i32> >();
+ check_sync::<OwnedRwLockMappedWriteGuard<u32, i32> >();
+ check_unpin::<OwnedRwLockMappedWriteGuard<u32, i32> >();
+ let rwlock = Arc::new(RwLock::new(0));
+ check_send_sync_val(rwlock.read());
+ check_send_sync_val(Arc::clone(&rwlock).read_owned());
+ check_send_sync_val(rwlock.write());
+ check_send_sync_val(Arc::clone(&rwlock).write_owned())
+}
+
+unsafe impl<T> Send for RwLock<T> where T: Sized + Send {
+}
+
+unsafe impl<T> Sync for RwLock<T> where T: Sized + Send + Sync {
+}
+
+unsafe impl<T> Send for RwLockReadGuard<'_, T> where T: Sized + Sync {
+}
+
+unsafe impl<T> Sync for RwLockReadGuard<'_, T> where T: Sized + Send + Sync {
+}
+
+unsafe impl<T, U> Send for OwnedRwLockReadGuard<T, U> where T: Sized + Send + Sync, U: Sized + Sync {
+}
+
+unsafe impl<T, U> Sync for OwnedRwLockReadGuard<T, U> where T: Sized + Send + Sync, U: Sized + Send + Sync {
+}
+
+unsafe impl<T> Sync for RwLockWriteGuard<'_, T> where T: Sized + Send + Sync {
+}
+
+unsafe impl<T> Sync for OwnedRwLockWriteGuard<T> where T: Sized + Send + Sync {
+}
+
+unsafe impl<T> Sync for RwLockMappedWriteGuard<'_, T> where T: Sized + Send + Sync {
+}
+
+unsafe impl<T, U> Sync for OwnedRwLockMappedWriteGuard<T, U> where T: Sized + Send + Sync, U: Sized + Send + Sync {
+}
+
+unsafe impl<T> Send for RwLockWriteGuard<'_, T> where T: Sized + Send + Sync {
+}
+
+unsafe impl<T> Send for OwnedRwLockWriteGuard<T> where T: Sized + Send + Sync {
+}
+
+unsafe impl<T> Send for RwLockMappedWriteGuard<'_, T> where T: Sized + Send + Sync {
+}
+
+unsafe impl<T, U> Send for OwnedRwLockMappedWriteGuard<T, U> where T: Sized + Send + Sync, U: Sized + Send + Sync {
+}
+
+impl<T: Sized> RwLock<T> {
+ pub fn new(value: T) -> RwLock<T> {
+ let resource_span = { let location = std::panic::Location::caller(); let resource_span = tracing::trace_span!(parent: None, "runtime.resource", concrete_type = "RwLock", kind = "Sync", loc.file = location.file(), loc.line = location.line(), loc.col = location.column() ); resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", max_readers = MAX_READS ); tracing::trace!(target: "runtime::resource::state_update", write_locked = false ); tracing::trace!(target: "runtime::resource::state_update", current_readers = 0 ); }); resource_span };
+ let s = resource_span.in_scope(| | Semaphore::new(MAX_READS as usize));
+ let s = Semaphore::new(MAX_READS as usize);
+ RwLock { mr: MAX_READS, c: UnsafeCell::new(value), s, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span }
+ }
+ 
+ pub fn with_max_readers(value: T, max_reads: u32) -> RwLock<T> {
+ assert_ne!(max_reads, 0, "a RwLock may not be created with 0 readers");
+ assert!(max_reads <= MAX_READS, "a RwLock may not be created with more than {MAX_READS} readers");
+ let resource_span = { let location = std::panic::Location::caller(); let resource_span = tracing::trace_span!(parent: None, "runtime.resource", concrete_type = "RwLock", kind = "Sync", loc.file = location.file(), loc.line = location.line(), loc.col = location.column() ); resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", max_readers = max_reads ); tracing::trace!(target: "runtime::resource::state_update", write_locked = false ); tracing::trace!(target: "runtime::resource::state_update", current_readers = 0 ); }); resource_span };
+ let s = resource_span.in_scope(| | Semaphore::new(max_reads as usize));
+ let s = Semaphore::new(max_reads as usize);
+ RwLock { mr: max_reads, c: UnsafeCell::new(value), s, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span }
+ }
+ 
+ pub fn const_new(value: T) -> RwLock<T> {
+ RwLock { mr: MAX_READS, c: UnsafeCell::new(value), s: Semaphore::const_new(MAX_READS as usize), #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: tracing::Span::none() }
+ }
+ 
+ pub fn const_with_max_readers(value: T, max_reads: u32) -> RwLock<T> {
+ assert!(max_reads != 0, "a RwLock may not be created with 0 readers");
+ assert!(max_reads <= MAX_READS);
+ RwLock { mr: max_reads, c: UnsafeCell::new(value), s: Semaphore::const_new(max_reads as usize), #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: tracing::Span::none() }
+ }
+ 
+ pub fn read(&self) -> RwLockReadGuard<'_, T> {
+ let acquire_fut = async { self.s.acquire(1).await.unwrap_or_else(| _ | { unreachable!() }); RwLockReadGuard { s: &self.s, data: self.c.get(), marker: PhantomData, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: self.resource_span.clone() } };
+ let acquire_fut = trace::async_op(move | | acquire_fut, self.resource_span.clone(), "RwLock::read", "poll", false );
+ let guard = acquire_fut.await;
+ #[cfg(all(tokio_unstable, feature = "tracing"))] self.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", current_readers = 1, current_readers.op = "add" ) });
+ guard
+ }
+ 
+ pub fn blocking_read(&self) -> RwLockReadGuard<'_, T> {
+ crate::future::block_on(self.read())
+ }
+ 
+ pub fn read_owned(self) -> OwnedRwLockReadGuard<T> {
+ let resource_span = self.resource_span.clone();
+ let acquire_fut = async { self.s.acquire(1).await.unwrap_or_else(| _ | { unreachable!() }); OwnedRwLockReadGuard { #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: self.resource_span.clone(), data: self.c.get(), lock: self, _p: PhantomData } };
+ let acquire_fut = trace::async_op(move | | acquire_fut, resource_span, "RwLock::read_owned", "poll", false );
+ let guard = acquire_fut.await;
+ #[cfg(all(tokio_unstable, feature = "tracing"))] guard.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", current_readers = 1, current_readers.op = "add" ) });
+ guard
+ }
+ 
+ pub fn try_read(&self) -> Result<RwLockReadGuard<'_, T>, TryLockError> {
+ match self.s.try_acquire(1) { Ok(permit) => permit, Err(TryAcquireError::NoPermits) => return Err(TryLockError(())), Err(TryAcquireError::Closed) => unreachable!() }
+ let guard = RwLockReadGuard { s: &self.s, data: self.c.get(), marker: marker::PhantomData, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: self.resource_span.clone() };
+ #[cfg(all(tokio_unstable, feature = "tracing"))] self.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", current_readers = 1, current_readers.op = "add" ) });
+ Ok(guard)
+ }
+ 
+ pub fn try_read_owned(self) -> Result<OwnedRwLockReadGuard<T>, TryLockError> {
+ match self.s.try_acquire(1) { Ok(permit) => permit, Err(TryAcquireError::NoPermits) => return Err(TryLockError(())), Err(TryAcquireError::Closed) => unreachable!() }
+ let guard = OwnedRwLockReadGuard { #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: self.resource_span.clone(), data: self.c.get(), lock: self, _p: PhantomData };
+ #[cfg(all(tokio_unstable, feature = "tracing"))] guard.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", current_readers = 1, current_readers.op = "add" ) });
+ Ok(guard)
+ }
+ 
+ pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+ let acquire_fut = async { debug_assert_ne!(self.mr, 0); self.s.acquire(self.mr as usize).await.unwrap_or_else(| _ | { unreachable!() }); RwLockWriteGuard { permits_acquired: self.mr, s: &self.s, data: self.c.get(), marker: marker::PhantomData, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: self.resource_span.clone() } };
+ let acquire_fut = trace::async_op(move | | acquire_fut, self.resource_span.clone(), "RwLock::write", "poll", false );
+ let guard = acquire_fut.await;
+ #[cfg(all(tokio_unstable, feature = "tracing"))] self.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", write_locked = true, write_locked.op = "override" ) });
+ guard
+ }
+ 
+ pub fn blocking_write(&self) -> RwLockWriteGuard<'_, T> {
+ crate::future::block_on(self.write())
+ }
+ 
+ pub fn write_owned(self) -> OwnedRwLockWriteGuard<T> {
+ let resource_span = self.resource_span.clone();
+ let acquire_fut = async { debug_assert_ne!(self.mr, 0); self.s.acquire(self.mr as usize).await.unwrap_or_else(| _ | { unreachable!() }); OwnedRwLockWriteGuard { #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: self.resource_span.clone(), permits_acquired: self.mr, data: self.c.get(), lock: self, _p: PhantomData } };
+ let acquire_fut = trace::async_op(move | | acquire_fut, resource_span, "RwLock::write_owned", "poll", false );
+ let guard = acquire_fut.await;
+ #[cfg(all(tokio_unstable, feature = "tracing"))] guard.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", write_locked = true, write_locked.op = "override" ) });
+ guard
+ }
+ 
+ pub fn try_write(&self) -> Result<RwLockWriteGuard<'_, T>, TryLockError> {
+ debug_assert_ne!(self.mr, 0);
+ match self.s.try_acquire(self.mr as usize) { Ok(permit) => permit, Err(TryAcquireError::NoPermits) => return Err(TryLockError(())), Err(TryAcquireError::Closed) => unreachable!() }
+ let guard = RwLockWriteGuard { permits_acquired: self.mr, s: &self.s, data: self.c.get(), marker: marker::PhantomData, #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: self.resource_span.clone() };
+ #[cfg(all(tokio_unstable, feature = "tracing"))] self.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", write_locked = true, write_locked.op = "override" ) });
+ Ok(guard)
+ }
+ 
+ pub fn try_write_owned(self) -> Result<OwnedRwLockWriteGuard<T>, TryLockError> {
+ debug_assert_ne!(self.mr, 0);
+ match self.s.try_acquire(self.mr as usize) { Ok(permit) => permit, Err(TryAcquireError::NoPermits) => return Err(TryLockError(())), Err(TryAcquireError::Closed) => unreachable!() }
+ let guard = OwnedRwLockWriteGuard { #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: self.resource_span.clone(), permits_acquired: self.mr, data: self.c.get(), lock: self, _p: PhantomData };
+ #[cfg(all(tokio_unstable, feature = "tracing"))] guard.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", write_locked = true, write_locked.op = "override" ) });
+ Ok(guard)
+ }
+ 
+ pub fn get_mut(&mut self) -> &mut T {
+ self.c.get_mut()
+ }
+ 
+ pub fn into_inner(self) -> T {
+ self.c.into_inner()
+ }
+ 
+}
+
+impl<T> From<T> for RwLock<T> {
+ fn from(s: T) -> Self {
+ Self::new(s)
+ }
+ 
+}
+
+impl<T> Default for RwLock<T> where T: Default {
+ fn default() -> Self {
+ Self::new(T::default())
+ }
+ 
+}
+
+impl<T: Sized> std::fmt::Debug for RwLock<T> where T: std::fmt::Debug {
+ fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+ let mut d = f.debug_struct("RwLock");
+ match self.try_read() { Ok(inner) => d.field("data", & &*inner), Err(_) => d.field("data", &format_args!("<locked>")) };
+ d.finish()
+ }
+ 
+}
+

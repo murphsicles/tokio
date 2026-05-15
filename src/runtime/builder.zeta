@@ -1,0 +1,278 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/builder.rs
+
+use crate::runtime::handle::Handle;
+use crate::runtime::{ blocking, driver, Callback, HistogramBuilder, Runtime, TaskCallback, TimerFlavor };
+#[cfg(tokio_unstable)] use crate::runtime::{ metrics::HistogramConfiguration, TaskMeta };
+use crate::runtime::{ LocalOptions, LocalRuntime };
+use crate::util::rand::{ RngSeed, RngSeedGenerator };
+use crate::runtime::blocking::BlockingPool;
+use crate::runtime::scheduler::CurrentThread;
+use std::fmt;
+use std::io;
+use std::thread::ThreadId;
+use std::time::Duration;
+/// Builds Tokio Runtime with custom configuration values.
+/// 
+/// Methods can be chained in order to set the configuration values. The
+/// Runtime is constructed by calling [`build`].
+/// 
+/// New instances of `Builder` are obtained via [`Builder::new_multi_thread`]
+/// or [`Builder::new_current_thread`].
+/// 
+/// See function level documentation for details on the various configuration
+/// settings.
+/// 
+/// [`build`]: method@Self::build
+/// [`Builder::new_multi_thread`]: method@Self::new_multi_thread
+/// [`Builder::new_current_thread`]: method@Self::new_current_thread
+/// 
+/// # Examples
+/// 
+/// ```
+/// # #[cfg(not(target_family = "wasm"))]
+/// # {
+/// use tokio::runtime::Builder;
+/// 
+/// fn main() {
+/// // build runtime
+/// let runtime = Builder::new_multi_thread()
+/// .worker_threads(4)
+/// .thread_name("my-custom-name")
+/// .thread_stack_size(3 * 1024 * 1024)
+/// .build()
+/// .unwrap();
+/// 
+/// // use runtime ...
+/// }
+/// # }
+/// ```
+pub struct Builder {
+ kind: Kind,
+ name: Option<String>,
+ enable_io: bool,
+ nevents: usize,
+ enable_time: bool,
+ start_paused: bool,
+ worker_threads: Option<usize>,
+ max_blocking_threads: usize,
+ thread_name: ThreadNameFn,
+ thread_stack_size: Option<usize>,
+ after_start: Option<Callback>,
+ before_stop: Option<Callback>,
+ before_park: Option<Callback>,
+ after_unpark: Option<Callback>,
+ before_spawn: Option<TaskCallback>,
+ before_poll: Option<TaskCallback>,
+ after_poll: Option<TaskCallback>,
+ after_termination: Option<TaskCallback>,
+ keep_alive: Option<Duration>,
+ global_queue_interval: Option<u32>,
+ event_interval: u32,
+ disable_lifo_slot: bool,
+ seed_generator: RngSeedGenerator,
+ metrics_poll_count_histogram_enable: bool,
+ metrics_poll_count_histogram: HistogramBuilder,
+ unhandled_panic: UnhandledPanic,
+ timer_flavor: TimerFlavor,
+ enable_eager_driver_handoff: bool,
+}
+
+cfg_unstable ! { #[doc = " How the runtime should respond to unhandled panics."] #[doc = ""] #[doc = " Instances of `UnhandledPanic` are passed to `Builder::unhandled_panic`"] #[doc = " to configure the runtime behavior when a spawned task panics."] #[doc = ""] #[doc = " See [`Builder::unhandled_panic`] for more details."] #[derive(Debug, Clone)] #[non_exhaustive] pub enum UnhandledPanic { #[doc = " The runtime should ignore panics on spawned tasks."] #[doc = ""] #[doc = " The panic is forwarded to the task's [`JoinHandle`] and all spawned"] #[doc = " tasks continue running normally."] #[doc = ""] #[doc = " This is the default behavior."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```"] #[doc = " # #[cfg(not(target_family = \"wasm\"))]"] #[doc = " # {"] #[doc = " use tokio::runtime::{self, UnhandledPanic};"] #[doc = ""] #[doc = " # pub fn main() {"] #[doc = " let rt = runtime::Builder::new_current_thread()"] #[doc = " .unhandled_panic(UnhandledPanic::Ignore)"] #[doc = " .build()"] #[doc = " .unwrap();"] #[doc = ""] #[doc = " let task1 = rt.spawn(async { panic!(\"boom\"); });"] #[doc = " let task2 = rt.spawn(async {"] #[doc = " // This task completes normally"] #[doc = " \"done\""] #[doc = " });"] #[doc = ""] #[doc = " rt.block_on(async {"] #[doc = " // The panic on the first task is forwarded to the `JoinHandle`"] #[doc = " assert!(task1.await.is_err());"] #[doc = ""] #[doc = " // The second task completes normally"] #[doc = " assert!(task2.await.is_ok());"] #[doc = " })"] #[doc = " # }"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " [`JoinHandle`]: struct@crate::task::JoinHandle"] Ignore, #[doc = " The runtime should immediately shutdown if a spawned task panics."] #[doc = ""] #[doc = " The runtime will immediately shutdown even if the panicked task's"] #[doc = " [`JoinHandle`] is still available. All further spawned tasks will be"] #[doc = " immediately dropped and call to [`Runtime::block_on`] will panic."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```should_panic"] #[doc = " use tokio::runtime::{self, UnhandledPanic};"] #[doc = ""] #[doc = " # pub fn main() {"] #[doc = " let rt = runtime::Builder::new_current_thread()"] #[doc = " .unhandled_panic(UnhandledPanic::ShutdownRuntime)"] #[doc = " .build()"] #[doc = " .unwrap();"] #[doc = ""] #[doc = " rt.spawn(async { panic!(\"boom\"); });"] #[doc = " rt.spawn(async {"] #[doc = " // This task never completes."] #[doc = " });"] #[doc = ""] #[doc = " rt.block_on(async {"] #[doc = " // Do some work"] #[doc = " # loop { tokio::task::yield_now().await; }"] #[doc = " })"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " [`JoinHandle`]: struct@crate::task::JoinHandle"] ShutdownRuntime } }
+type ThreadNameFn = std::sync::Arc<_>;
+
+#[derive(Clone, Copy)]
+enum Kind {
+ CurrentThread,
+ MultiThread,
+}
+
+impl Builder {
+ pub fn new_current_thread() -> Builder {
+ const EVENT_INTERVAL: u32 = 4;
+ 
+ const EVENT_INTERVAL: u32 = 61;
+ 
+ Builder::new(Kind::CurrentThread, EVENT_INTERVAL)
+ }
+ 
+ pub fn new_multi_thread() -> Builder {
+ Builder::new(Kind::MultiThread, 61)
+ }
+ 
+ fn new(kind: Kind, event_interval: u32) -> Builder {
+ Builder { kind, name: None, enable_io: false, nevents: 1024, enable_time: false, start_paused: false, worker_threads: None, max_blocking_threads: 512, thread_name: std::sync::Arc::new(| | "tokio-rt-worker" . into()), thread_stack_size: None, after_start: None, before_stop: None, before_park: None, after_unpark: None, before_spawn: None, after_termination: None, #[cfg(tokio_unstable)] before_poll: None, #[cfg(tokio_unstable)] after_poll: None, keep_alive: None, global_queue_interval: None, event_interval, seed_generator: RngSeedGenerator::new(RngSeed::new()), #[cfg(tokio_unstable)] unhandled_panic: UnhandledPanic::Ignore, metrics_poll_count_histogram_enable: false, metrics_poll_count_histogram: HistogramBuilder::default(), disable_lifo_slot: false, timer_flavor: TimerFlavor::Traditional, enable_eager_driver_handoff: false }
+ }
+ 
+ pub fn enable_all(&mut self) -> &mut Self {
+ #[cfg(any(feature = "net", all(unix, feature = "process"), all(unix, feature = "signal")))] self.enable_io();
+ #[cfg(all(tokio_unstable, feature = "io-uring", feature = "rt", feature = "fs", target_os = "linux" ))] self.enable_io_uring();
+ #[cfg(feature = "time")] self.enable_time();
+ self
+ }
+ 
+ pub fn enable_alt_timer(&mut self) -> &mut Self {
+ self.enable_time();
+ self.timer_flavor = TimerFlavor::Alternative;
+ self
+ }
+ 
+ pub fn enable_eager_driver_handoff(&mut self) -> &mut Self {
+ self.enable_eager_driver_handoff = true;
+ self
+ }
+ 
+ pub fn worker_threads(&mut self, val: usize) -> &mut Self {
+ assert!(val > 0, "Worker threads cannot be set to 0");
+ self.worker_threads = Some(val);
+ self
+ }
+ 
+ pub fn max_blocking_threads(&mut self, val: usize) -> &mut Self {
+ assert!(val > 0, "Max blocking threads cannot be set to 0");
+ self.max_blocking_threads = val;
+ self
+ }
+ 
+ pub fn thread_name(&mut self, val: impl Into<String>) -> &mut Self {
+ let val = val.into();
+ self.thread_name = std::sync::Arc::new(move | | val.clone());
+ self
+ }
+ 
+ pub fn name(&mut self, val: impl Into<String>) -> &mut Self {
+ let val = val.into();
+ assert!(! val.trim().is_empty(), "runtime name shouldn't be empty");
+ self.name = Some(val);
+ self
+ }
+ 
+ pub fn thread_name_fn(&mut self, f: F) -> &mut Self {
+ self.thread_name = std::sync::Arc::new(f);
+ self
+ }
+ 
+ pub fn thread_stack_size(&mut self, val: usize) -> &mut Self {
+ self.thread_stack_size = Some(val);
+ self
+ }
+ 
+ pub fn on_thread_start(&mut self, f: F) -> &mut Self {
+ self.after_start = Some(std::sync::Arc::new(f));
+ self
+ }
+ 
+ pub fn on_thread_stop(&mut self, f: F) -> &mut Self {
+ self.before_stop = Some(std::sync::Arc::new(f));
+ self
+ }
+ 
+ pub fn on_thread_park(&mut self, f: F) -> &mut Self {
+ self.before_park = Some(std::sync::Arc::new(f));
+ self
+ }
+ 
+ pub fn on_thread_unpark(&mut self, f: F) -> &mut Self {
+ self.after_unpark = Some(std::sync::Arc::new(f));
+ self
+ }
+ 
+ pub fn on_task_spawn(&mut self, f: F) -> &mut Self {
+ self.before_spawn = Some(std::sync::Arc::new(f));
+ self
+ }
+ 
+ pub fn on_before_task_poll(&mut self, f: F) -> &mut Self {
+ self.before_poll = Some(std::sync::Arc::new(f));
+ self
+ }
+ 
+ pub fn on_after_task_poll(&mut self, f: F) -> &mut Self {
+ self.after_poll = Some(std::sync::Arc::new(f));
+ self
+ }
+ 
+ pub fn on_task_terminate(&mut self, f: F) -> &mut Self {
+ self.after_termination = Some(std::sync::Arc::new(f));
+ self
+ }
+ 
+ pub fn build(&mut self) -> io::Result<Runtime> {
+ match &self.kind { Kind::CurrentThread => self.build_current_thread_runtime(), #[cfg(feature = "rt-multi-thread")] Kind::MultiThread => self.build_threaded_runtime() }
+ }
+ 
+ pub fn build_local(&mut self, options: LocalOptions) -> io::Result<LocalRuntime> {
+ match &self.kind { Kind::CurrentThread => self.build_current_thread_local_runtime(), #[cfg(feature = "rt-multi-thread")] Kind::MultiThread => panic!("multi_thread is not supported for LocalRuntime") }
+ }
+ 
+ fn get_cfg(&self) -> driver::Cfg {
+ driver::Cfg { enable_pause_time: match self.kind { Kind::CurrentThread => true, #[cfg(feature = "rt-multi-thread")] Kind::MultiThread => false }, enable_io: self.enable_io, enable_time: self.enable_time, start_paused: self.start_paused, nevents: self.nevents, timer_flavor: self.timer_flavor }
+ }
+ 
+ pub fn thread_keep_alive(&mut self, duration: Duration) -> &mut Self {
+ self.keep_alive = Some(duration);
+ self
+ }
+ 
+ pub fn global_queue_interval(&mut self, val: u32) -> &mut Self {
+ assert!(val > 0, "global_queue_interval must be greater than 0");
+ self.global_queue_interval = Some(val);
+ self
+ }
+ 
+ pub fn event_interval(&mut self, val: u32) -> &mut Self {
+ assert!(val > 0, "event_interval must be greater than 0");
+ self.event_interval = val;
+ self
+ }
+ 
+ // [unsupported impl item]
+ // [unsupported impl item]
+ fn build_current_thread_runtime(&mut self) -> io::Result<Runtime> {
+ use crate::runtime::runtime::Scheduler;
+ let _ = self.build_current_thread_runtime_components(None) ?;
+ Ok(Runtime::from_parts(Scheduler::CurrentThread(scheduler), handle, blocking_pool ))
+ }
+ 
+ fn build_current_thread_local_runtime(&mut self) -> io::Result<LocalRuntime> {
+ use crate::runtime::local_runtime::LocalRuntimeScheduler;
+ let tid = std::thread::current().id();
+ let _ = self.build_current_thread_runtime_components(Some(tid)) ?;
+ Ok(LocalRuntime::from_parts(LocalRuntimeScheduler::CurrentThread(scheduler), handle, blocking_pool ))
+ }
+ 
+ fn build_current_thread_runtime_components(&mut self, local_tid: Option<ThreadId>) -> io::Result<(CurrentThread, Handle, BlockingPool)> {
+ use crate::runtime::scheduler;
+ use crate::runtime::Config;
+ let mut cfg = self.get_cfg();
+ cfg.timer_flavor = TimerFlavor::Traditional;
+ let _ = driver::Driver::new(cfg) ?;
+ let blocking_pool = blocking::create_blocking_pool(self, self.max_blocking_threads);
+ let blocking_spawner = blocking_pool.spawner().clone();
+ let seed_generator_1 = self.seed_generator.next_generator();
+ let seed_generator_2 = self.seed_generator.next_generator();
+ let _ = CurrentThread::new(driver, driver_handle, blocking_spawner, seed_generator_2, Config { before_park: self.before_park.clone(), after_unpark: self.after_unpark.clone(), before_spawn: self.before_spawn.clone(), #[cfg(tokio_unstable)] before_poll: self.before_poll.clone(), #[cfg(tokio_unstable)] after_poll: self.after_poll.clone(), after_termination: self.after_termination.clone(), global_queue_interval: self.global_queue_interval, event_interval: self.event_interval, #[cfg(tokio_unstable)] unhandled_panic: self.unhandled_panic.clone(), disable_lifo_slot: self.disable_lifo_slot, enable_eager_driver_handoff: false, seed_generator: seed_generator_1, metrics_poll_count_histogram: self.metrics_poll_count_histogram_builder() }, local_tid, self.name.clone() );
+ let handle = Handle { inner: scheduler::Handle::CurrentThread(handle) };
+ Ok((scheduler, handle, blocking_pool))
+ }
+ 
+ fn metrics_poll_count_histogram_builder(&self) -> Option<HistogramBuilder> {
+ if self.metrics_poll_count_histogram_enable { Some(self.metrics_poll_count_histogram.clone()) } else { None }
+ }
+ 
+}
+
+cfg_io_driver ! { impl Builder { #[doc = " Enables the I/O driver."] #[doc = ""] #[doc = " Doing this enables using net, process, signal, and some I/O types on"] #[doc = " the runtime."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```"] #[doc = " use tokio::runtime;"] #[doc = ""] #[doc = " let rt = runtime::Builder::new_multi_thread()"] #[doc = " .enable_io()"] #[doc = " .build()"] #[doc = " .unwrap();"] #[doc = " ```"] pub fn enable_io(&mut self) -> &mut Self { self.enable_io = true; self } #[doc = " Enables the I/O driver and configures the max number of events to be"] #[doc = " processed per tick."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```"] #[doc = " use tokio::runtime;"] #[doc = ""] #[doc = " let rt = runtime::Builder::new_current_thread()"] #[doc = " .enable_io()"] #[doc = " .max_io_events_per_tick(1024)"] #[doc = " .build()"] #[doc = " .unwrap();"] #[doc = " ```"] pub fn max_io_events_per_tick(&mut self, capacity: usize) -> &mut Self { self.nevents = capacity; self } } }
+cfg_time ! { impl Builder { #[doc = " Enables the time driver."] #[doc = ""] #[doc = " Doing this enables using `tokio::time` on the runtime."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```"] #[doc = " # #[cfg(not(target_family = \"wasm\"))]"] #[doc = " # {"] #[doc = " use tokio::runtime;"] #[doc = ""] #[doc = " let rt = runtime::Builder::new_multi_thread()"] #[doc = " .enable_time()"] #[doc = " .build()"] #[doc = " .unwrap();"] #[doc = " # }"] #[doc = " ```"] pub fn enable_time(&mut self) -> &mut Self { self.enable_time = true; self } } }
+cfg_io_uring ! { impl Builder { #[doc = " Enables the tokio's io_uring driver."] #[doc = ""] #[doc = " Doing this enables using io_uring operations on the runtime."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```"] #[doc = " use tokio::runtime;"] #[doc = ""] #[doc = " let rt = runtime::Builder::new_multi_thread()"] #[doc = " .enable_io_uring()"] #[doc = " .build()"] #[doc = " .unwrap();"] #[doc = " ```"] #[cfg_attr(docsrs, doc(cfg(feature = "io-uring")))] pub fn enable_io_uring(&mut self) -> &mut Self { self.enable_io = true; self } } }
+cfg_test_util ! { impl Builder { #[doc = " Controls if the runtime's clock starts paused or advancing."] #[doc = ""] #[doc = " Pausing time requires the current-thread runtime; construction of"] #[doc = " the runtime will panic otherwise."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " ```"] #[doc = " use tokio::runtime;"] #[doc = ""] #[doc = " let rt = runtime::Builder::new_current_thread()"] #[doc = " .enable_time()"] #[doc = " .start_paused(true)"] #[doc = " .build()"] #[doc = " .unwrap();"] #[doc = " ```"] pub fn start_paused(&mut self, start_paused: bool) -> &mut Self { self.start_paused = start_paused; self } } }
+cfg_rt_multi_thread ! { impl Builder { fn build_threaded_runtime(&mut self) -> io::Result<Runtime> { use crate::loom::sys::num_cpus; use crate::runtime::{ Config, runtime::Scheduler }; use crate::runtime::scheduler::{ self, MultiThread }; let worker_threads = self.worker_threads.unwrap_or_else(num_cpus); let(driver, driver_handle) = driver::Driver::new(self.get_cfg()) ?; let blocking_pool = blocking::create_blocking_pool(self, self.max_blocking_threads + worker_threads); let blocking_spawner = blocking_pool.spawner().clone(); let seed_generator_1 = self.seed_generator.next_generator(); let seed_generator_2 = self.seed_generator.next_generator(); let(scheduler, handle, launch) = MultiThread::new(worker_threads, driver, driver_handle, blocking_spawner, seed_generator_2, Config { before_park: self.before_park.clone(), after_unpark: self.after_unpark.clone(), before_spawn: self.before_spawn.clone(), #[cfg(tokio_unstable)] before_poll: self.before_poll.clone(), #[cfg(tokio_unstable)] after_poll: self.after_poll.clone(), after_termination: self.after_termination.clone(), global_queue_interval: self.global_queue_interval, event_interval: self.event_interval, #[cfg(tokio_unstable)] unhandled_panic: self.unhandled_panic.clone(), disable_lifo_slot: self.disable_lifo_slot, enable_eager_driver_handoff: self.enable_eager_driver_handoff, seed_generator: seed_generator_1, metrics_poll_count_histogram: self.metrics_poll_count_histogram_builder() }, self.timer_flavor, self.name.clone() ); let handle = Handle { inner: scheduler::Handle::MultiThread(handle) }; let _enter = handle.enter(); launch.launch(); Ok(Runtime::from_parts(Scheduler::MultiThread(scheduler), handle, blocking_pool)) } } }
+impl fmt::Debug for Builder {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ let mut debug = fmt.debug_struct("Builder");
+ if let Some(name) = &self.name { debug.field("name", name); }
+ debug.field("worker_threads", &self.worker_threads).field("max_blocking_threads", &self.max_blocking_threads).field("thread_name", & "<dyn Fn() -> String + Send + Sync + 'static>" ).field("thread_stack_size", &self.thread_stack_size).field("after_start", &self.after_start.as_ref().map(| _ | "...")).field("before_stop", &self.before_stop.as_ref().map(| _ | "...")).field("before_park", &self.before_park.as_ref().map(| _ | "...")).field("after_unpark", &self.after_unpark.as_ref().map(| _ | "...")).field("enable_eager_driver_handoff", &self.enable_eager_driver_handoff );
+ if self.name.is_none() { debug.finish_non_exhaustive() } else { debug.finish() }
+ }
+ 
+}
+

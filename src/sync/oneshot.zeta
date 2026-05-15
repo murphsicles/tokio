@@ -1,0 +1,553 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/sync/oneshot.rs
+
+use crate::loom::cell::UnsafeCell;
+use crate::loom::sync::atomic::AtomicUsize;
+use crate::loom::sync::Arc;
+#[cfg(all(tokio_unstable, feature = "tracing"))] use crate::util::trace;
+use std::fmt;
+use std::future::Future;
+use std::mem::MaybeUninit;
+use std::pin::Pin;
+use std::sync::atomic::Ordering::{ self, AcqRel, Acquire };
+use std::task::Poll::{ Pending, Ready };
+use std::task::{ ready, Context, Poll, Waker };
+/// Sends a value to the associated [`Receiver`].
+/// 
+/// A pair of both a [`Sender`] and a [`Receiver`] are created by the
+/// [`channel`](fn@channel) function.
+/// 
+/// # Examples
+/// 
+/// ```
+/// use tokio::sync::oneshot;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let(tx, rx) = oneshot::channel();
+/// 
+/// tokio::spawn(async move {
+/// if let Err(_) = tx.send(3) {
+/// println!("the receiver dropped");
+/// }
+/// });
+/// 
+/// match rx.await {
+/// Ok(v) => println!("got = {:?}", v),
+/// Err(_) => println!("the sender dropped"),
+/// }
+/// # }
+/// ```
+/// 
+/// If the sender is dropped without sending, the receiver will fail with
+/// [`error::RecvError`]:
+/// 
+/// ```
+/// use tokio::sync::oneshot;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let(tx, rx) = oneshot::channel::<u32>();
+/// 
+/// tokio::spawn(async move {
+/// drop(tx);
+/// });
+/// 
+/// match rx.await {
+/// Ok(_) => panic!("This doesn't happen"),
+/// Err(_) => println!("the sender dropped"),
+/// }
+/// # }
+/// ```
+/// 
+/// To use a `Sender` from a destructor, put it in an [`Option`] and call
+/// [`Option::take`].
+/// 
+/// ```
+/// use tokio::sync::oneshot;
+/// 
+/// struct SendOnDrop {
+/// sender: Option<oneshot::Sender<&'static str>>,
+/// }
+/// impl Drop for SendOnDrop {
+/// fn drop(&mut self) {
+/// if let Some(sender) = self.sender.take() {
+/// // Using `let _ =` to ignore send errors.
+/// let _ = sender.send("I got dropped!");
+/// }
+/// }
+/// }
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn _doc() {}
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let(send, recv) = oneshot::channel();
+/// 
+/// let send_on_drop = SendOnDrop { sender: Some(send) };
+/// drop(send_on_drop);
+/// 
+/// assert_eq!(recv.await, Ok("I got dropped!"));
+/// # }
+/// ```
+/// 
+/// [`Option`]: std::option::Option
+/// [`Option::take`]: std::option::Option::take
+#[derive(Debug)]
+pub struct Sender<T> {
+ inner: Option<Arc<Inner<T>>>,
+ resource_span: tracing::Span,
+}
+
+/// Receives a value from the associated [`Sender`].
+/// 
+/// A pair of both a [`Sender`] and a [`Receiver`] are created by the
+/// [`channel`](fn@channel) function.
+/// 
+/// This channel has no `recv` method because the receiver itself implements the
+/// [`Future`] trait. To receive a `Result<T, `[`error::RecvError`]`>`, `.await` the `Receiver` object directly.
+/// 
+/// The `poll` method on the `Future` trait is allowed to spuriously return
+/// `Poll::Pending` even if the message has been sent. If such a spurious
+/// failure happens, then the caller will be woken when the spurious failure has
+/// been resolved so that the caller can attempt to receive the message again.
+/// Note that receiving such a wakeup does not guarantee that the next call will
+/// succeed — it could fail with another spurious failure. (A spurious failure
+/// does not mean that the message is lost. It is just delayed.)
+/// 
+/// [`Future`]: trait@std::future::Future
+/// 
+/// # Cancellation safety
+/// 
+/// The `Receiver` is cancel safe. If it is used as the event in a
+/// [`tokio::select!`](crate::select) statement and some other branch
+/// completes first, it is guaranteed that no message was received on this
+/// channel.
+/// 
+/// # Examples
+/// 
+/// ```
+/// use tokio::sync::oneshot;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let(tx, rx) = oneshot::channel();
+/// 
+/// tokio::spawn(async move {
+/// if let Err(_) = tx.send(3) {
+/// println!("the receiver dropped");
+/// }
+/// });
+/// 
+/// match rx.await {
+/// Ok(v) => println!("got = {:?}", v),
+/// Err(_) => println!("the sender dropped"),
+/// }
+/// # }
+/// ```
+/// 
+/// If the sender is dropped without sending, the receiver will fail with
+/// [`error::RecvError`]:
+/// 
+/// ```
+/// use tokio::sync::oneshot;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let(tx, rx) = oneshot::channel::<u32>();
+/// 
+/// tokio::spawn(async move {
+/// drop(tx);
+/// });
+/// 
+/// match rx.await {
+/// Ok(_) => panic!("This doesn't happen"),
+/// Err(_) => println!("the sender dropped"),
+/// }
+/// # }
+/// ```
+/// 
+/// To use a `Receiver` in a `tokio::select!` loop, add `&mut` in front of the
+/// channel.
+/// 
+/// ```
+/// use tokio::sync::oneshot;
+/// use tokio::time::{interval, sleep, Duration};
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn _doc() {}
+/// # #[tokio::main(flavor = "current_thread", start_paused = true)]
+/// # async fn main() {
+/// let(send, mut recv) = oneshot::channel();
+/// let mut interval = interval(Duration::from_millis(100));
+/// 
+/// # let handle =
+/// tokio::spawn(async move {
+/// sleep(Duration::from_secs(1)).await;
+/// send.send("shut down").unwrap();
+/// });
+/// 
+/// loop {
+/// tokio::select! {
+/// _ = interval.tick() => println!("Another 100ms"),
+/// msg = &mut recv => {
+/// println!("Got message: {}", msg.unwrap());
+/// break;
+/// }
+/// }
+/// }
+/// # handle.await.unwrap();
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct Receiver<T> {
+ inner: Option<Arc<Inner<T>>>,
+ resource_span: tracing::Span,
+ async_op_span: tracing::Span,
+ async_op_poll_span: tracing::Span,
+}
+
+/// `Oneshot` error types.
+pub mod error {
+ use std::fmt;
+ /// Error returned by the `Future` implementation for `Receiver`.
+ /// 
+ /// This error is returned by the receiver when the sender is dropped without sending.
+ #[derive(Debug, Eq, PartialEq, Clone)]
+ pub struct RecvError {
+ (()),
+ }
+ 
+ /// Error returned by the `try_recv` function on `Receiver`.
+ #[derive(Debug, Eq, PartialEq, Clone)]
+ pub enum TryRecvError {
+ Empty,
+ Closed,
+ }
+ 
+ impl fmt::Display for RecvError {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ write!(fmt, "channel closed")
+ }
+ 
+ }
+ 
+ impl std::error::Error for RecvError {
+ }
+ 
+ impl fmt::Display for TryRecvError {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ match self { TryRecvError::Empty => write!(fmt, "channel empty"), TryRecvError::Closed => write!(fmt, "channel closed") }
+ }
+ 
+ }
+ 
+ impl std::error::Error for TryRecvError {
+ }
+ 
+}
+
+use self::error::*;
+struct Inner<T> {
+ state: AtomicUsize,
+ value: UnsafeCell<Option<T>>,
+ tx_task: Task,
+ rx_task: Task,
+}
+
+struct Task {
+ (UnsafeCell<MaybeUninit<Waker>>),
+}
+
+impl Task {
+ fn will_wake(&self, cx: &mut Context<'_>) -> bool {
+ unsafe { self.with_task(| w | w.will_wake(cx.waker())) }
+ }
+ 
+ fn with_task(&self, f: F) -> R {
+ self.0.with(| ptr | { let waker: *const Waker = unsafe { (*ptr).as_ptr() }; f(unsafe { &*waker }) })
+ }
+ 
+ fn drop_task(&self) {
+ self.0.with_mut(| ptr | { let ptr: *mut Waker = unsafe { (*ptr).as_mut_ptr() }; unsafe { ptr.drop_in_place(); } });
+ }
+ 
+ fn set_task(&self, cx: &mut Context<'_>) {
+ self.0.with_mut(| ptr | { let ptr: *mut Waker = unsafe { (*ptr).as_mut_ptr() }; unsafe { ptr.write(cx.waker().clone()); } });
+ }
+ 
+}
+
+#[derive(Clone, Copy)]
+struct State {
+ (usize),
+}
+
+/// Creates a new one-shot channel for sending single values across asynchronous
+/// tasks.
+/// 
+/// The function returns separate "send" and "receive" handles. The `Sender`
+/// handle is used by the producer to send the value. The `Receiver` handle is
+/// used by the consumer to receive the value.
+/// 
+/// Each handle can be used on separate tasks.
+/// 
+/// # Examples
+/// 
+/// ```
+/// use tokio::sync::oneshot;
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let(tx, rx) = oneshot::channel();
+/// 
+/// tokio::spawn(async move {
+/// if let Err(_) = tx.send(3) {
+/// println!("the receiver dropped");
+/// }
+/// });
+/// 
+/// match rx.await {
+/// Ok(v) => println!("got = {:?}", v),
+/// Err(_) => println!("the sender dropped"),
+/// }
+/// # }
+/// ```
+#[track_caller]
+pub fn channel<T>() ->(Sender<T>, Receiver<T>) {
+ let resource_span = { let location = std::panic::Location::caller(); let resource_span = tracing::trace_span!(parent: None, "runtime.resource", concrete_type = "Sender|Receiver", kind = "Sync", loc.file = location.file(), loc.line = location.line(), loc.col = location.column() ); resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", tx_dropped = false, tx_dropped.op = "override" ) }); resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", rx_dropped = false, rx_dropped.op = "override" ) }); resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", value_sent = false, value_sent.op = "override" ) }); resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", value_received = false, value_received.op = "override" ) }); resource_span };
+ let inner = Arc::new(Inner { state: AtomicUsize::new(State::new().as_usize()), value: UnsafeCell::new(None), tx_task: Task(UnsafeCell::new(MaybeUninit::uninit())), rx_task: Task(UnsafeCell::new(MaybeUninit::uninit())) });
+ let tx = Sender { inner: Some(inner.clone()), #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span: resource_span.clone() };
+ let async_op_span = resource_span.in_scope(| | tracing::trace_span!("runtime.resource.async_op", source = "Receiver::await"));
+ let async_op_poll_span = async_op_span.in_scope(| | tracing::trace_span!("runtime.resource.async_op.poll"));
+ let rx = Receiver { inner: Some(inner), #[cfg(all(tokio_unstable, feature = "tracing"))] resource_span, #[cfg(all(tokio_unstable, feature = "tracing"))] async_op_span, #[cfg(all(tokio_unstable, feature = "tracing"))] async_op_poll_span };
+ (tx, rx)
+}
+
+impl<T> Sender<T> {
+ pub fn send(self, t: T) -> Result<(), T> {
+ let inner = self.inner.take().unwrap();
+ inner.value.with_mut(| ptr | unsafe { *ptr = Some(t); });
+ if ! inner.complete() { unsafe { return Err(inner.consume_value().unwrap()); } }
+ #[cfg(all(tokio_unstable, feature = "tracing"))] self.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", value_sent = true, value_sent.op = "override" ) });
+ Ok(())
+ }
+ 
+ pub fn closed(&mut self) {
+ use std::future::poll_fn;
+ let resource_span = self.resource_span.clone();
+ let closed = trace::async_op(| | poll_fn(| cx | self.poll_closed(cx)), resource_span, "Sender::closed", "poll_closed", false );
+ let closed = poll_fn(| cx | self.poll_closed(cx));
+ closed.await;
+ }
+ 
+ pub fn is_closed(&self) -> bool {
+ let inner = self.inner.as_ref().unwrap();
+ let state = State::load(&inner.state, Acquire);
+ state.is_closed()
+ }
+ 
+ pub fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+ ready!(crate::trace::trace_leaf(cx));
+ let coop = ready!(crate::task::coop::poll_proceed(cx));
+ let inner = self.inner.as_ref().unwrap();
+ let mut state = State::load(&inner.state, Acquire);
+ if state.is_closed() { coop.made_progress(); return Ready(()); }
+ if state.is_tx_task_set() { let will_notify = unsafe { inner.tx_task.will_wake(cx) }; if ! will_notify { state = State::unset_tx_task(&inner.state); if state.is_closed() { State::set_tx_task(&inner.state); coop.made_progress(); return Ready(()); } else { unsafe { inner.tx_task.drop_task() }; } } }
+ if ! state.is_tx_task_set() { unsafe { inner.tx_task.set_task(cx); } state = State::set_tx_task(&inner.state); if state.is_closed() { coop.made_progress(); return Ready(()); } }
+ Pending
+ }
+ 
+}
+
+impl<T> Drop for Sender<T> {
+ fn drop(&mut self) {
+ if let Some(inner) = self.inner.as_ref() { inner.complete(); #[cfg(all(tokio_unstable, feature = "tracing"))] self.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", tx_dropped = true, tx_dropped.op = "override" ) }); }
+ }
+ 
+}
+
+impl<T> Receiver<T> {
+ pub fn close(&mut self) {
+ if let Some(inner) = self.inner.as_ref() { inner.close(); #[cfg(all(tokio_unstable, feature = "tracing"))] self.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", rx_dropped = true, rx_dropped.op = "override" ) }); }
+ }
+ 
+ pub fn is_terminated(&self) -> bool {
+ self.inner.is_none()
+ }
+ 
+ pub fn is_empty(&self) -> bool {
+ let _ = self.inner.as_ref();
+ let state = State::load(&inner.state, Acquire);
+ if state.is_complete() { unsafe { ! inner.has_value() } } else { true }
+ }
+ 
+ pub fn try_recv(&mut self) -> Result<T, TryRecvError> {
+ let result = if let Some(inner) = self.inner.as_ref() { let state = State::load(&inner.state, Acquire); if state.is_complete() { match unsafe { inner.consume_value() } { Some(value) => { #[cfg(all(tokio_unstable, feature = "tracing"))] self.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", value_received = true, value_received.op = "override" ) }); Ok(value) } None => Err(TryRecvError::Closed) } } else if state.is_closed() { Err(TryRecvError::Closed) } else { return Err(TryRecvError::Empty); } } else { Err(TryRecvError::Closed) };
+ self.inner = None;
+ result
+ }
+ 
+ pub fn blocking_recv(self) -> Result<T, RecvError> {
+ crate::future::block_on(self)
+ }
+ 
+}
+
+impl<T> Drop for Receiver<T> {
+ fn drop(&mut self) {
+ if let Some(inner) = self.inner.as_ref() { let state = inner.close(); if state.is_complete() { drop(unsafe { inner.consume_value() }); } #[cfg(all(tokio_unstable, feature = "tracing"))] self.resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", rx_dropped = true, rx_dropped.op = "override" ) }); }
+ }
+ 
+}
+
+impl<T> Future for Receiver<T> {
+ type Output = Result<T, RecvError>;
+ fn poll(self, cx: &mut Context<'_>) -> Poll<Self::Output> {
+ let _res_span = self.resource_span.clone().entered();
+ let _ao_span = self.async_op_span.clone().entered();
+ let _ao_poll_span = self.async_op_poll_span.clone().entered();
+ let ret = if let Some(inner) = self.as_ref().get_ref().inner.as_ref() { #[cfg(all(tokio_unstable, feature = "tracing"))] let res = ready!(trace_poll_op!("poll_recv", inner.poll_recv(cx))).map_err(Into::into); #[cfg(any(not(tokio_unstable), not(feature = "tracing")))] let res = ready!(inner.poll_recv(cx)).map_err(Into::into); res } else { panic!("called after complete"); };
+ self.inner = None;
+ Ready(ret)
+ }
+ 
+}
+
+impl<T> Inner<T> {
+ fn complete(&self) -> bool {
+ let prev = State::set_complete(&self.state);
+ if prev.is_closed() { return false; }
+ if prev.is_rx_task_set() { unsafe { self.rx_task.with_task(Waker::wake_by_ref); } }
+ true
+ }
+ 
+ fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Result<T, RecvError>> {
+ ready!(crate::trace::trace_leaf(cx));
+ let coop = ready!(crate::task::coop::poll_proceed(cx));
+ let mut state = State::load(&self.state, Acquire);
+ if state.is_complete() { coop.made_progress(); match unsafe { self.consume_value() } { Some(value) => Ready(Ok(value)), None => Ready(Err(RecvError(()))) } } else if state.is_closed() { coop.made_progress(); Ready(Err(RecvError(()))) } else { if state.is_rx_task_set() { let will_notify = unsafe { self.rx_task.will_wake(cx) }; if ! will_notify { state = State::unset_rx_task(&self.state); if state.is_complete() { State::set_rx_task(&self.state); coop.made_progress(); return match unsafe { self.consume_value() } { Some(value) => Ready(Ok(value)), None => Ready(Err(RecvError(()))) }; } else { unsafe { self.rx_task.drop_task() }; } } } if ! state.is_rx_task_set() { unsafe { self.rx_task.set_task(cx); } state = State::set_rx_task(&self.state); if state.is_complete() { coop.made_progress(); match unsafe { self.consume_value() } { Some(value) => Ready(Ok(value)), None => Ready(Err(RecvError(()))) } } else { Pending } } else { Pending } }
+ }
+ 
+ fn close(&self) -> State {
+ let prev = State::set_closed(&self.state);
+ if prev.is_tx_task_set() && ! prev.is_complete() { unsafe { self.tx_task.with_task(Waker::wake_by_ref); } }
+ if prev.is_rx_task_set() && ! prev.is_complete() { State::unset_rx_task(&self.state); unsafe { self.rx_task.drop_task() }; }
+ prev
+ }
+ 
+ fn consume_value(&self) -> Option<T> {
+ self.value.with_mut(| ptr | unsafe { (*ptr).take() })
+ }
+ 
+ fn has_value(&self) -> bool {
+ self.value.with(| ptr | unsafe { (*ptr).is_some() })
+ }
+ 
+}
+
+unsafe impl<T: Send> Send for Inner<T> {
+}
+
+unsafe impl<T: Send> Sync for Inner<T> {
+}
+
+fn mut_load(this: &mut AtomicUsize) -> usize {
+ this.with_mut(| v | *v)
+}
+
+impl<T> Drop for Inner<T> {
+ fn drop(&mut self) {
+ let state = State(mut_load(&mut self.state));
+ if state.is_rx_task_set() { unsafe { self.rx_task.drop_task(); } }
+ if state.is_tx_task_set() { unsafe { self.tx_task.drop_task(); } }
+ unsafe { debug_assert!(self.consume_value().is_none()); }
+ }
+ 
+}
+
+impl<T: fmt::Debug> fmt::Debug for Inner<T> {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ use std::sync::atomic::Ordering::Relaxed;
+ fmt.debug_struct("Inner").field("state", &State::load(&self.state, Relaxed)).finish()
+ }
+ 
+}
+
+const RX_TASK_SET: usize = 0b00001;
+
+const VALUE_SENT: usize = 0b00010;
+
+const CLOSED: usize = 0b00100;
+
+const TX_TASK_SET: usize = 0b01000;
+
+impl State {
+ fn new() -> State {
+ State(0)
+ }
+ 
+ fn is_complete(self) -> bool {
+ self.0 &VALUE_SENT == VALUE_SENT
+ }
+ 
+ fn set_complete(cell: &AtomicUsize) -> State {
+ let mut state = cell.load(Ordering::Relaxed);
+ loop { if State(state).is_closed() { break; } match cell.compare_exchange_weak(state, state | VALUE_SENT, Ordering::AcqRel, Ordering::Acquire ) { Ok(_) => break, Err(actual) => state = actual } }
+ State(state)
+ }
+ 
+ fn is_rx_task_set(self) -> bool {
+ self.0 &RX_TASK_SET == RX_TASK_SET
+ }
+ 
+ fn set_rx_task(cell: &AtomicUsize) -> State {
+ let val = cell.fetch_or(RX_TASK_SET, AcqRel);
+ State(val | RX_TASK_SET)
+ }
+ 
+ fn unset_rx_task(cell: &AtomicUsize) -> State {
+ let val = cell.fetch_and(! RX_TASK_SET, AcqRel);
+ State(val & ! RX_TASK_SET)
+ }
+ 
+ fn is_closed(self) -> bool {
+ self.0 &CLOSED == CLOSED
+ }
+ 
+ fn set_closed(cell: &AtomicUsize) -> State {
+ let val = cell.fetch_or(CLOSED, Acquire);
+ State(val)
+ }
+ 
+ fn set_tx_task(cell: &AtomicUsize) -> State {
+ let val = cell.fetch_or(TX_TASK_SET, AcqRel);
+ State(val | TX_TASK_SET)
+ }
+ 
+ fn unset_tx_task(cell: &AtomicUsize) -> State {
+ let val = cell.fetch_and(! TX_TASK_SET, AcqRel);
+ State(val & ! TX_TASK_SET)
+ }
+ 
+ fn is_tx_task_set(self) -> bool {
+ self.0 &TX_TASK_SET == TX_TASK_SET
+ }
+ 
+ fn as_usize(self) -> usize {
+ self.0
+ }
+ 
+ fn load(cell: &AtomicUsize, order: Ordering) -> State {
+ let val = cell.load(order);
+ State(val)
+ }
+ 
+}
+
+impl fmt::Debug for State {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ fmt.debug_struct("State").field("is_complete", &self.is_complete()).field("is_closed", &self.is_closed()).field("is_rx_task_set", &self.is_rx_task_set()).field("is_tx_task_set", &self.is_tx_task_set()).finish()
+ }
+ 
+}
+

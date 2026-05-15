@@ -1,0 +1,547 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/net/unix/pipe.rs
+
+use crate::io::interest::Interest;
+use crate::io::{ AsyncRead, AsyncWrite, PollEvented, ReadBuf, Ready };
+use mio::unix::pipe as mio_pipe;
+use std::fs::File;
+use std::io::{ self, Read, Write };
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::io::{ AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd };
+use std::path::Path;
+use std::pin::Pin;
+use std::task::{ Context, Poll };
+cfg_io_util ! { use bytes::BufMut; }
+/// Creates a new anonymous Unix pipe.
+/// 
+/// This function will open a new pipe and associate both pipe ends with the default
+/// event loop.
+/// 
+/// If you need to create a pipe for communication with a spawned process, you can
+/// use [`Stdio::piped()`] instead.
+/// 
+/// [`Stdio::piped()`]: std::process::Stdio::piped
+/// 
+/// # Errors
+/// 
+/// If creating a pipe fails, this function will return with the related OS error.
+/// 
+/// # Examples
+/// 
+/// Create a pipe and pass the writing end to a spawned process.
+/// 
+/// ```no_run
+/// use tokio::net::unix::pipe;
+/// use tokio::process::Command;
+/// # use tokio::io::AsyncReadExt;
+/// # use std::error::Error;
+/// 
+/// # async fn dox() -> Result<(), Box<dyn Error>> {
+/// let(tx, mut rx) = pipe::pipe()?;
+/// let mut buffer = String::new();
+/// 
+/// let status = Command::new("echo")
+/// .arg("Hello, world!")
+/// .stdout(tx.into_blocking_fd()?)
+/// .status();
+/// rx.read_to_string(&mut buffer).await?;
+/// 
+/// assert!(status.await?.success());
+/// assert_eq!(buffer, "Hello, world!\n");
+/// # Ok(())
+/// # }
+/// ```
+/// 
+/// # Panics
+/// 
+/// This function panics if it is not called from within a runtime with
+/// IO enabled.
+/// 
+/// The runtime is usually set implicitly when this function is called
+/// from a future driven by a tokio runtime, otherwise runtime can be set
+/// explicitly with [`Runtime::enter`](crate::runtime::Runtime::enter) function.
+pub fn pipe() -> io::Result<(Sender, Receiver)> {
+ let _ = mio_pipe::new() ?;
+ Ok((Sender::from_mio(tx) ?, Receiver::from_mio(rx) ?))
+}
+
+/// Options and flags which can be used to configure how a FIFO file is opened.
+/// 
+/// This builder allows configuring how to create a pipe end from a FIFO file.
+/// Generally speaking, when using `OpenOptions`, you'll first call [`new`],
+/// then chain calls to methods to set each option, then call either
+/// [`open_receiver`] or [`open_sender`], passing the path of the FIFO file you
+/// are trying to open. This will give you a [`io::Result`] with a pipe end
+/// inside that you can further operate on.
+/// 
+/// [`new`]: OpenOptions::new
+/// [`open_receiver`]: OpenOptions::open_receiver
+/// [`open_sender`]: OpenOptions::open_sender
+/// 
+/// # Examples
+/// 
+/// Opening a pair of pipe ends from a FIFO file:
+/// 
+/// ```no_run
+/// use tokio::net::unix::pipe;
+/// # use std::error::Error;
+/// 
+/// const FIFO_NAME: &str = "path/to/a/fifo";
+/// 
+/// # async fn dox() -> Result<(), Box<dyn Error>> {
+/// let rx = pipe::OpenOptions::new().open_receiver(FIFO_NAME)?;
+/// let tx = pipe::OpenOptions::new().open_sender(FIFO_NAME)?;
+/// # Ok(())
+/// # }
+/// ```
+/// 
+/// Opening a [`Sender`] on Linux when you are sure the file is a FIFO:
+/// 
+/// ```ignore
+/// use tokio::net::unix::pipe;
+/// use nix::{unistd::mkfifo, sys::stat::Mode};
+/// # use std::error::Error;
+/// 
+/// // Our program has exclusive access to this path.
+/// const FIFO_NAME: &str = "path/to/a/new/fifo";
+/// 
+/// # async fn dox() -> Result<(), Box<dyn Error>> {
+/// mkfifo(FIFO_NAME, Mode::S_IRWXU)?;
+/// let tx = pipe::OpenOptions::new()
+/// .read_write(true)
+/// .unchecked(true)
+/// .open_sender(FIFO_NAME)?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone, Debug)]
+pub struct OpenOptions {
+ read_write: bool,
+ unchecked: bool,
+}
+
+impl OpenOptions {
+ pub fn new() -> OpenOptions {
+ OpenOptions { #[cfg(any(target_os = "linux", target_os = "android"))] read_write: false, unchecked: false }
+ }
+ 
+ pub fn read_write(&mut self, value: bool) -> &mut Self {
+ self.read_write = value;
+ self
+ }
+ 
+ pub fn unchecked(&mut self, value: bool) -> &mut Self {
+ self.unchecked = value;
+ self
+ }
+ 
+ pub fn open_receiver(&self, path: P) -> io::Result<Receiver> {
+ let file = self.open(path.as_ref(), PipeEnd::Receiver) ?;
+ Receiver::from_file_unchecked(file)
+ }
+ 
+ pub fn open_sender(&self, path: P) -> io::Result<Sender> {
+ let file = self.open(path.as_ref(), PipeEnd::Sender) ?;
+ Sender::from_file_unchecked(file)
+ }
+ 
+ fn open(&self, path: &Path, pipe_end: PipeEnd) -> io::Result<File> {
+ let mut options = std::fs::OpenOptions::new();
+ options.read(pipe_end == PipeEnd::Receiver).write(pipe_end == PipeEnd::Sender).custom_flags(libc::O_NONBLOCK);
+ #[cfg(any(target_os = "linux", target_os = "android"))] if self.read_write { options.read(true).write(true); }
+ let file = options.open(path) ?;
+ if ! self.unchecked && ! is_pipe(file.as_fd()) ? { return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a pipe")); }
+ Ok(file)
+ }
+ 
+}
+
+impl Default for OpenOptions {
+ fn default() -> OpenOptions {
+ OpenOptions::new()
+ }
+ 
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PipeEnd {
+ Sender,
+ Receiver,
+}
+
+/// Writing end of a Unix pipe.
+/// 
+/// It can be constructed from a FIFO file with [`OpenOptions::open_sender`].
+/// 
+/// Opening a named pipe for writing involves a few steps.
+/// Call to [`OpenOptions::open_sender`] might fail with an error indicating
+/// different things:
+/// 
+/// * [`io::ErrorKind::NotFound`] - There is no file at the specified path.
+/// * [`io::ErrorKind::InvalidInput`] - The file exists, but it is not a FIFO.
+/// * [`ENXIO`] - The file is a FIFO, but no process has it open for reading.
+/// Sleep for a while and try again.
+/// *Other OS errors not specific to opening FIFO files.
+/// 
+/// Opening a `Sender` from a FIFO file should look like this:
+/// 
+/// ```no_run
+/// use tokio::net::unix::pipe;
+/// use tokio::time::{self, Duration};
+/// 
+/// const FIFO_NAME: &str = "path/to/a/fifo";
+/// 
+/// # async fn dox() -> Result<(), Box<dyn std::error::Error>> {
+/// // Wait for a reader to open the file.
+/// let tx = loop {
+/// match pipe::OpenOptions::new().open_sender(FIFO_NAME) {
+/// Ok(tx) => break tx,
+/// Err(e) if e.raw_os_error() == Some(libc::ENXIO) => {},
+/// Err(e) => return Err(e.into()),
+/// }
+/// 
+/// time::sleep(Duration::from_millis(50)).await;
+/// };
+/// # Ok(())
+/// # }
+/// ```
+/// 
+/// On Linux, it is possible to create a `Sender` without waiting in a sleeping
+/// loop. This is done by opening a named pipe in read-write access mode with
+/// `OpenOptions::read_write`. This way, a `Sender` can at the same time hold
+/// both a writing end and a reading end, and the latter allows to open a FIFO
+/// without [`ENXIO`] error since the pipe is open for reading as well.
+/// 
+/// `Sender` cannot be used to read from a pipe, so in practice the read access
+/// is only used when a FIFO is opened. However, using a `Sender` in read-write
+/// mode **may lead to lost data**, because written data will be dropped by the
+/// system as soon as all pipe ends are closed. To avoid lost data you have to
+/// make sure that a reading end has been opened before dropping a `Sender`.
+/// 
+/// Note that using read-write access mode with FIFO files is not defined by
+/// the POSIX standard and it is only guaranteed to work on Linux.
+/// 
+/// ```ignore
+/// use tokio::io::AsyncWriteExt;
+/// use tokio::net::unix::pipe;
+/// 
+/// const FIFO_NAME: &str = "path/to/a/fifo";
+/// 
+/// # async fn dox() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut tx = pipe::OpenOptions::new()
+/// .read_write(true)
+/// .open_sender(FIFO_NAME)?;
+/// 
+/// // Asynchronously write to the pipe before a reader.
+/// tx.write_all(b"hello world").await?;
+/// # Ok(())
+/// # }
+/// ```
+/// 
+/// [`ENXIO`]: https://docs.rs/libc/latest/libc/constant.ENXIO.html
+#[derive(Debug)]
+pub struct Sender {
+ io: PollEvented<mio_pipe::Sender>,
+}
+
+impl Sender {
+ fn from_mio(mio_tx: mio_pipe::Sender) -> io::Result<Sender> {
+ let io = PollEvented::new_with_interest(mio_tx, Interest::WRITABLE) ?;
+ Ok(Sender { io })
+ }
+ 
+ pub fn from_file(file: File) -> io::Result<Sender> {
+ Sender::from_owned_fd(file.into())
+ }
+ 
+ pub fn from_owned_fd(owned_fd: OwnedFd) -> io::Result<Sender> {
+ if ! is_pipe(owned_fd.as_fd()) ? { return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a pipe")); }
+ let flags = get_file_flags(owned_fd.as_fd()) ?;
+ if has_write_access(flags) { set_nonblocking(owned_fd.as_fd(), flags) ?; Sender::from_owned_fd_unchecked(owned_fd) } else { Err(io::Error::new(io::ErrorKind::InvalidInput, "not in O_WRONLY or O_RDWR access mode" )) }
+ }
+ 
+ pub fn from_file_unchecked(file: File) -> io::Result<Sender> {
+ Sender::from_owned_fd_unchecked(file.into())
+ }
+ 
+ pub fn from_owned_fd_unchecked(owned_fd: OwnedFd) -> io::Result<Sender> {
+ let mio_tx = unsafe { mio_pipe::Sender::from_raw_fd(owned_fd.into_raw_fd()) };
+ Sender::from_mio(mio_tx)
+ }
+ 
+ pub fn ready(&self, interest: Interest) -> io::Result<Ready> {
+ let event = self.io.registration().readiness(interest).await ?;
+ Ok(event.ready)
+ }
+ 
+ pub fn writable(&self) -> io::Result<()> {
+ self.ready(Interest::WRITABLE).await ?;
+ Ok(())
+ }
+ 
+ pub fn poll_write_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.io.registration().poll_write_ready(cx).map_ok(| _ | ())
+ }
+ 
+ pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::WRITABLE, | | (&*self.io).write(buf))
+ }
+ 
+ pub fn try_write_vectored(&self, buf: &[io::IoSlice<'_>]) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::WRITABLE, | | (&*self.io).write_vectored(buf))
+ }
+ 
+ pub fn try_io(&self, f: impl FnOnce) -> io::Result<R> {
+ self.io.registration().try_io(Interest::WRITABLE, | | self.io.try_io(f))
+ }
+ 
+ pub fn into_blocking_fd(self) -> io::Result<OwnedFd> {
+ let fd = self.into_nonblocking_fd() ?;
+ set_blocking(&fd) ?;
+ Ok(fd)
+ }
+ 
+ pub fn into_nonblocking_fd(self) -> io::Result<OwnedFd> {
+ let mio_pipe = self.io.into_inner() ?;
+ let owned_fd = unsafe { OwnedFd::from_raw_fd(mio_pipe.into_raw_fd()) };
+ Ok(owned_fd)
+ }
+ 
+}
+
+impl AsyncWrite for Sender {
+ fn poll_write(self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+ self.io.poll_write(cx, buf)
+ }
+ 
+ fn poll_write_vectored(self, cx: &mut Context<'_>, bufs: &[io::IoSlice<'_>]) -> Poll<io::Result<usize>> {
+ self.io.poll_write_vectored(cx, bufs)
+ }
+ 
+ fn is_write_vectored(&self) -> bool {
+ true
+ }
+ 
+ fn poll_flush(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(Ok(()))
+ }
+ 
+ fn poll_shutdown(self, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+ Poll::Ready(Ok(()))
+ }
+ 
+}
+
+impl AsRawFd for Sender {
+ fn as_raw_fd(&self) -> RawFd {
+ self.io.as_raw_fd()
+ }
+ 
+}
+
+impl AsFd for Sender {
+ fn as_fd(&self) -> BorrowedFd<'_> {
+ unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+ }
+ 
+}
+
+/// Reading end of a Unix pipe.
+/// 
+/// It can be constructed from a FIFO file with [`OpenOptions::open_receiver`].
+/// 
+/// # Examples
+/// 
+/// Receiving messages from a named pipe in a loop:
+/// 
+/// ```no_run
+/// use tokio::net::unix::pipe;
+/// use tokio::io::{self, AsyncReadExt};
+/// 
+/// const FIFO_NAME: &str = "path/to/a/fifo";
+/// 
+/// # async fn dox() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut rx = pipe::OpenOptions::new().open_receiver(FIFO_NAME)?;
+/// loop {
+/// let mut msg = vec![0; 256];
+/// match rx.read_exact(&mut msg).await {
+/// Ok(_) => {
+/// /*handle the message */
+/// }
+/// Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+/// // Writing end has been closed, we should reopen the pipe.
+/// rx = pipe::OpenOptions::new().open_receiver(FIFO_NAME)?;
+/// }
+/// Err(e) => return Err(e.into()),
+/// }
+/// }
+/// # }
+/// ```
+/// 
+/// On Linux, you can use a `Receiver` in read-write access mode to implement
+/// resilient reading from a named pipe. Unlike `Receiver` opened in read-only
+/// mode, read from a pipe in read-write mode will not fail with `UnexpectedEof`
+/// when the writing end is closed. This way, a `Receiver` can asynchronously
+/// wait for the next writer to open the pipe.
+/// 
+/// You should not use functions waiting for EOF such as [`read_to_end`] with
+/// a `Receiver` in read-write access mode, since it **may wait forever**.
+/// `Receiver` in this mode also holds an open writing end, which prevents
+/// receiving EOF.
+/// 
+/// To set the read-write access mode you can use `OpenOptions::read_write`.
+/// Note that using read-write access mode with FIFO files is not defined by
+/// the POSIX standard and it is only guaranteed to work on Linux.
+/// 
+/// ```ignore
+/// use tokio::net::unix::pipe;
+/// use tokio::io::AsyncReadExt;
+/// # use std::error::Error;
+/// 
+/// const FIFO_NAME: &str = "path/to/a/fifo";
+/// 
+/// # async fn dox() -> Result<(), Box<dyn Error>> {
+/// let mut rx = pipe::OpenOptions::new()
+/// .read_write(true)
+/// .open_receiver(FIFO_NAME)?;
+/// loop {
+/// let mut msg = vec![0; 256];
+/// rx.read_exact(&mut msg).await?;
+/// /*handle the message */
+/// }
+/// # }
+/// ```
+/// 
+/// [`read_to_end`]: crate::io::AsyncReadExt::read_to_end
+#[derive(Debug)]
+pub struct Receiver {
+ io: PollEvented<mio_pipe::Receiver>,
+}
+
+impl Receiver {
+ fn from_mio(mio_rx: mio_pipe::Receiver) -> io::Result<Receiver> {
+ let io = PollEvented::new_with_interest(mio_rx, Interest::READABLE) ?;
+ Ok(Receiver { io })
+ }
+ 
+ pub fn from_file(file: File) -> io::Result<Receiver> {
+ Receiver::from_owned_fd(file.into())
+ }
+ 
+ pub fn from_owned_fd(owned_fd: OwnedFd) -> io::Result<Receiver> {
+ if ! is_pipe(owned_fd.as_fd()) ? { return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a pipe")); }
+ let flags = get_file_flags(owned_fd.as_fd()) ?;
+ if has_read_access(flags) { set_nonblocking(owned_fd.as_fd(), flags) ?; Receiver::from_owned_fd_unchecked(owned_fd) } else { Err(io::Error::new(io::ErrorKind::InvalidInput, "not in O_RDONLY or O_RDWR access mode" )) }
+ }
+ 
+ pub fn from_file_unchecked(file: File) -> io::Result<Receiver> {
+ Receiver::from_owned_fd_unchecked(file.into())
+ }
+ 
+ pub fn from_owned_fd_unchecked(owned_fd: OwnedFd) -> io::Result<Receiver> {
+ let mio_rx = unsafe { mio_pipe::Receiver::from_raw_fd(owned_fd.into_raw_fd()) };
+ Receiver::from_mio(mio_rx)
+ }
+ 
+ pub fn ready(&self, interest: Interest) -> io::Result<Ready> {
+ let event = self.io.registration().readiness(interest).await ?;
+ Ok(event.ready)
+ }
+ 
+ pub fn readable(&self) -> io::Result<()> {
+ self.ready(Interest::READABLE).await ?;
+ Ok(())
+ }
+ 
+ pub fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+ self.io.registration().poll_read_ready(cx).map_ok(| _ | ())
+ }
+ 
+ pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::READABLE, | | (&*self.io).read(buf))
+ }
+ 
+ pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
+ self.io.registration().try_io(Interest::READABLE, | | (&*self.io).read_vectored(bufs))
+ }
+ 
+ pub fn try_io(&self, f: impl FnOnce) -> io::Result<R> {
+ self.io.registration().try_io(Interest::READABLE, | | self.io.try_io(f))
+ }
+ 
+ // [unsupported impl item]
+ pub fn into_blocking_fd(self) -> io::Result<OwnedFd> {
+ let fd = self.into_nonblocking_fd() ?;
+ set_blocking(&fd) ?;
+ Ok(fd)
+ }
+ 
+ pub fn into_nonblocking_fd(self) -> io::Result<OwnedFd> {
+ let mio_pipe = self.io.into_inner() ?;
+ let owned_fd = unsafe { OwnedFd::from_raw_fd(mio_pipe.into_raw_fd()) };
+ Ok(owned_fd)
+ }
+ 
+}
+
+impl AsyncRead for Receiver {
+ fn poll_read(self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+ unsafe { self.io.poll_read(cx, buf) }
+ }
+ 
+}
+
+impl AsRawFd for Receiver {
+ fn as_raw_fd(&self) -> RawFd {
+ self.io.as_raw_fd()
+ }
+ 
+}
+
+impl AsFd for Receiver {
+ fn as_fd(&self) -> BorrowedFd<'_> {
+ unsafe { BorrowedFd::borrow_raw(self.as_raw_fd()) }
+ }
+ 
+}
+
+/// Checks if the file descriptor is a pipe or a FIFO.
+fn is_pipe(fd: BorrowedFd<'_>) -> io::Result<bool> {
+ let _ = unsafe { std::mem::zeroed() };
+ let r = unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) };
+ if r == - 1 { Err(io::Error::last_os_error()) } else { Ok((stat.st_mode as libc::mode_t &libc::S_IFMT) == libc::S_IFIFO) }
+}
+
+/// Gets file descriptor's flags by fcntl.
+fn get_file_flags(fd: BorrowedFd<'_>) -> io::Result<libc::c_int> {
+ let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+ if flags<0 { Err(io::Error::last_os_error()) } else { Ok(flags) }
+}
+
+/// Checks for `O_RDONLY` or `O_RDWR` access mode.
+fn has_read_access(flags: libc::c_int) -> bool {
+ let mode = flags &libc::O_ACCMODE;
+ mode == libc::O_RDONLY || mode == libc::O_RDWR
+}
+
+/// Checks for `O_WRONLY` or `O_RDWR` access mode.
+fn has_write_access(flags: libc::c_int) -> bool {
+ let mode = flags &libc::O_ACCMODE;
+ mode == libc::O_WRONLY || mode == libc::O_RDWR
+}
+
+/// Sets file descriptor's flags with `O_NONBLOCK` by fcntl.
+fn set_nonblocking(fd: BorrowedFd<'_>, current_flags: libc::c_int) -> io::Result<()> {
+ let flags = current_flags | libc::O_NONBLOCK;
+ if flags != current_flags { let ret = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags) }; if ret < 0 { return Err(io::Error::last_os_error()); } }
+ Ok(())
+}
+
+/// Removes `O_NONBLOCK` from fd's flags.
+fn set_blocking<T: AsRawFd>(fd: &T) -> io::Result<()> {
+ let previous = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+ if previous == - 1 { return Err(io::Error::last_os_error()); }
+ let new = previous & ! libc::O_NONBLOCK;
+ let r = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, new) };
+ if r == - 1 { Err(io::Error::last_os_error()) } else { Ok(()) }
+}
+

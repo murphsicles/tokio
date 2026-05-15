@@ -1,0 +1,22 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/loom/std/unsafe_cell.rs
+
+#[derive(Debug)]
+struct UnsafeCell<T> {
+ (std::cell::UnsafeCell<T>),
+}
+
+impl<T> UnsafeCell<T> {
+ fn new(data: T) -> UnsafeCell<T> {
+ UnsafeCell(std::cell::UnsafeCell::new(data))
+ }
+ 
+ fn with(&self, f: impl FnOnce) -> R {
+ f(self.0.get())
+ }
+ 
+ fn with_mut(&self, f: impl FnOnce) -> R {
+ f(self.0.get())
+ }
+ 
+}
+

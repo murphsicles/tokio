@@ -1,0 +1,85 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/multi_thread/handle.rs
+
+use crate::future::Future;
+use crate::loom::sync::Arc;
+use crate::runtime::scheduler::multi_thread::worker;
+use crate::runtime::task::{ Notified, Task, TaskHarnessScheduleHooks };
+use crate::runtime::{ blocking, driver, task::{ self, JoinHandle, SpawnLocation }, TaskHooks, TaskMeta, TimerFlavor };
+use crate::util::RngSeedGenerator;
+use std::fmt;
+use std::num::NonZeroU64;
+mod metrics;
+cfg_taskdump ! { mod taskdump; }
+#[cfg(all(tokio_unstable, feature = "time"))] use crate::loom::sync::atomic::{ AtomicBool, Ordering::SeqCst };
+/// Handle to the multi thread scheduler
+struct Handle {
+ name: Option<String>,
+ shared: worker::Shared,
+ driver: driver::Handle,
+ blocking_spawner: blocking::Spawner,
+ seed_generator: RngSeedGenerator,
+ task_hooks: TaskHooks,
+ timer_flavor: TimerFlavor,
+ is_shutdown: AtomicBool,
+}
+
+impl Handle {
+ fn spawn(me: &Arc<Self>, future: F, id: task::Id, spawned_at: SpawnLocation) -> JoinHandle<F::Output> {
+ Self::bind_new_task(me, future, id, spawned_at)
+ }
+ 
+ fn is_shutdown(&self) -> bool {
+ self.is_shutdown.load(crate::loom::sync::atomic::Ordering::SeqCst)
+ }
+ 
+ fn shutdown(&self) {
+ self.close();
+ #[cfg(all(tokio_unstable, feature = "time"))] self.is_shutdown.store(true, SeqCst);
+ }
+ 
+ fn bind_new_task(me: &Arc<Self>, future: T, id: task::Id, spawned_at: SpawnLocation) -> JoinHandle<T::Output> {
+ let _ = me.shared.owned.bind(future, me.clone(), id, spawned_at);
+ me.task_hooks.spawn(&TaskMeta { id, spawned_at, _phantom: Default::default() });
+ me.schedule_option_task_without_yield(notified);
+ handle
+ }
+ 
+}
+
+impl task::Schedule for Arc<Handle> {
+ fn release(&self, task: &Task<Self>) -> Option<Task<Self>> {
+ self.shared.owned.remove(task)
+ }
+ 
+ fn schedule(&self, task: Notified<Self>) {
+ self.schedule_task(task, false);
+ }
+ 
+ fn hooks(&self) -> TaskHarnessScheduleHooks {
+ TaskHarnessScheduleHooks { task_terminate_callback: self.task_hooks.task_terminate_callback.clone() }
+ }
+ 
+ fn yield_now(&self, task: Notified<Self>) {
+ self.schedule_task(task, true);
+ }
+ 
+}
+
+impl Handle {
+ fn owned_id(&self) -> NonZeroU64 {
+ self.shared.owned.id
+ }
+ 
+ fn name(&self) -> Option<&str> {
+ self.name.as_deref()
+ }
+ 
+}
+
+impl fmt::Debug for Handle {
+ fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+ fmt.debug_struct("multi_thread::Handle { ... }").finish()
+ }
+ 
+}
+

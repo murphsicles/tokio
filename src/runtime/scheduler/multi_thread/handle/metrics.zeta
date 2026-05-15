@@ -1,0 +1,25 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/multi_thread/handle/metrics.rs
+
+use super::Handle;
+use crate::runtime::WorkerMetrics;
+cfg_unstable_metrics ! { use crate::runtime::SchedulerMetrics; }
+impl Handle {
+ fn num_workers(&self) -> usize {
+ self.shared.worker_metrics.len()
+ }
+ 
+ fn num_alive_tasks(&self) -> usize {
+ self.shared.owned.num_alive_tasks()
+ }
+ 
+ fn injection_queue_depth(&self) -> usize {
+ self.shared.injection_queue_depth()
+ }
+ 
+ fn worker_metrics(&self, worker: usize) -> &WorkerMetrics {
+ &self.shared.worker_metrics [worker]
+ }
+ 
+ // [unsupported impl item]
+}
+

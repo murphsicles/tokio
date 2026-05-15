@@ -1,0 +1,64 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/metrics/batch.rs
+
+use crate::runtime::metrics::WorkerMetrics;
+cfg_unstable_metrics ! { use crate::runtime::metrics::HistogramBatch; }
+use std::sync::atomic::Ordering::Relaxed;
+use std::time::{ Duration, Instant };
+struct MetricsBatch {
+ busy_duration_total: u64,
+ processing_scheduled_tasks_started_at: Option<Instant>,
+ park_count: u64,
+ park_unpark_count: u64,
+ noop_count: u64,
+ steal_count: u64,
+ steal_operations: u64,
+ poll_count: u64,
+ poll_count_on_last_park: u64,
+ local_schedule_count: u64,
+ overflow_count: u64,
+ poll_timer: Option<PollTimer>,
+}
+
+cfg_unstable_metrics ! { struct PollTimer { #[doc = " Histogram of poll counts within each band."] poll_counts: HistogramBatch, #[doc = " Instant when the most recent task started polling."] poll_started_at: Instant } }
+impl MetricsBatch {
+ fn new(worker_metrics: &WorkerMetrics) -> MetricsBatch {
+ let maybe_now = now();
+ Self::new_unstable(worker_metrics, maybe_now)
+ }
+ 
+ // [unsupported impl item]
+ fn submit(&mut self, worker: &WorkerMetrics, mean_poll_time: u64) {
+ worker.busy_duration_total.store(self.busy_duration_total, Relaxed);
+ self.submit_unstable(worker, mean_poll_time);
+ }
+ 
+ // [unsupported impl item]
+ // [unsupported impl item]
+ fn unparked(&mut self) {
+ self.park_unpark_count += 1;
+ }
+ 
+ fn start_processing_scheduled_tasks(&mut self) {
+ self.processing_scheduled_tasks_started_at = now();
+ }
+ 
+ fn end_processing_scheduled_tasks(&mut self) {
+ if let Some(processing_scheduled_tasks_started_at) = self.processing_scheduled_tasks_started_at { let busy_duration = processing_scheduled_tasks_started_at.elapsed(); self.busy_duration_total += duration_as_u64(busy_duration); }
+ }
+ 
+ // [unsupported impl item]
+ // [unsupported impl item]
+ // [unsupported impl item]
+}
+
+cfg_rt_multi_thread ! { impl MetricsBatch { cfg_metrics_variant ! { stable: { pub(crate) fn incr_steal_count(&mut self, _by: u16) { } }, unstable: { pub(crate) fn incr_steal_count(&mut self, by: u16) { self.steal_count += by as u64; } } } cfg_metrics_variant ! { stable: { pub(crate) fn incr_steal_operations(&mut self) { } }, unstable: { pub(crate) fn incr_steal_operations(&mut self) { self.steal_operations += 1; } } } cfg_metrics_variant ! { stable: { pub(crate) fn incr_overflow_count(&mut self) { } }, unstable: { pub(crate) fn incr_overflow_count(&mut self) { self.overflow_count += 1; } } } } }
+fn duration_as_u64(dur: Duration) -> u64 {
+ u64::try_from(dur.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// Gate unsupported time metrics for `wasm32-unknown-unknown`
+/// <https://github.com/tokio-rs/tokio/issues/7319>
+fn now() -> Option<Instant> {
+ if cfg!(all(target_arch = "wasm32", target_os = "unknown", target_vendor = "unknown")) { None } else { Some(Instant::now()) }
+}
+

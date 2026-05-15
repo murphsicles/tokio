@@ -1,0 +1,36 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/time_alt/registration_queue.rs
+
+use super::{ Entry, EntryHandle, RegistrationQueueEntry };
+use crate::util::linked_list;
+type EntryList = linked_list::LinkedList<RegistrationQueueEntry, Entry>;
+
+/// A queue of entries that need to be registered in the timer wheel.
+#[derive(Debug)]
+struct RegistrationQueue {
+ list: EntryList,
+}
+
+impl Drop for RegistrationQueue {
+ fn drop(&mut self) {
+ while let Some(hdl) = self.list.pop_front() { drop(hdl); }
+ }
+ 
+}
+
+impl RegistrationQueue {
+ fn new() -> Self {
+ Self { list: EntryList::new() }
+ }
+ 
+ fn push_front(&mut self, hdl: EntryHandle) {
+ self.list.push_front(hdl);
+ }
+ 
+ fn pop_front(&mut self) -> Option<EntryHandle> {
+ self.list.pop_front()
+ }
+ 
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,188 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/time/sleep.rs
+
+use crate::runtime::Timer;
+use crate::time::{ error::Error, Duration, Instant };
+use crate::util::trace;
+use pin_project_lite::pin_project;
+use std::future::Future;
+use std::panic::Location;
+use std::pin::Pin;
+use std::task::{ self, ready, Poll };
+/// Waits until `deadline` is reached.
+/// 
+/// No work is performed while awaiting on the sleep future to complete. `Sleep`
+/// operates at millisecond granularity and should not be used for tasks that
+/// require high-resolution timers.
+/// 
+/// To run something regularly on a schedule, see [`interval`].
+/// 
+/// # Cancellation
+/// 
+/// Canceling a sleep instance is done by dropping the returned future. No additional
+/// cleanup work is required.
+/// 
+/// # Examples
+/// 
+/// Wait 100ms and print "100 ms have elapsed".
+/// 
+/// ```
+/// use tokio::time::{sleep_until, Instant, Duration};
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// sleep_until(Instant::now() + Duration::from_millis(100)).await;
+/// println!("100 ms have elapsed");
+/// # }
+/// ```
+/// 
+/// See the documentation for the [`Sleep`] type for more examples.
+/// 
+/// # Panics
+/// 
+/// This function panics if there is no current timer set.
+/// 
+/// It can be triggered when [`Builder::enable_time`] or
+/// [`Builder::enable_all`] are not included in the builder.
+/// 
+/// It can also panic whenever a timer is created outside of a
+/// Tokio runtime. That is why `rt.block_on(sleep(...))` will panic,
+/// since the function is executed outside of the runtime.
+/// Whereas `rt.block_on(async {sleep(...).await})` doesn't panic.
+/// And this is because wrapping the function on an async makes it lazy,
+/// and so gets executed inside the runtime successfully without
+/// panicking.
+/// 
+/// [`Sleep`]: struct@crate::time::Sleep
+/// [`interval`]: crate::time::interval()
+/// [`Builder::enable_time`]: crate::runtime::Builder::enable_time
+/// [`Builder::enable_all`]: crate::runtime::Builder::enable_all
+#[cfg_attr(docsrs, doc(alias = "delay_until"))]
+#[track_caller]
+pub fn sleep_until(deadline: Instant) -> Sleep {
+ Sleep::new_timeout(deadline, trace::caller_location())
+}
+
+/// Waits until `duration` has elapsed.
+/// 
+/// Equivalent to `sleep_until(Instant::now() + duration)`. An asynchronous
+/// analog to `std::thread::sleep`.
+/// 
+/// No work is performed while awaiting on the sleep future to complete. `Sleep`
+/// operates at millisecond granularity and should not be used for tasks that
+/// require high-resolution timers. The implementation is platform specific,
+/// and some platforms(specifically Windows) will provide timers with a
+/// larger resolution than 1 ms.
+/// 
+/// To run something regularly on a schedule, see [`interval`].
+/// 
+/// # Cancellation
+/// 
+/// Canceling a sleep instance is done by dropping the returned future. No additional
+/// cleanup work is required.
+/// 
+/// # Examples
+/// 
+/// Wait 100ms and print "100 ms have elapsed".
+/// 
+/// ```
+/// use tokio::time::{sleep, Duration};
+/// 
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// sleep(Duration::from_millis(100)).await;
+/// println!("100 ms have elapsed");
+/// # }
+/// ```
+/// 
+/// See the documentation for the [`Sleep`] type for more examples.
+/// 
+/// # Panics
+/// 
+/// This function panics if there is no current timer set.
+/// 
+/// It can be triggered when [`Builder::enable_time`] or
+/// [`Builder::enable_all`] are not included in the builder.
+/// 
+/// It can also panic whenever a timer is created outside of a
+/// Tokio runtime. That is why `rt.block_on(sleep(...))` will panic,
+/// since the function is executed outside of the runtime.
+/// Whereas `rt.block_on(async {sleep(...).await})` doesn't panic.
+/// And this is because wrapping the function on an async makes it lazy,
+/// and so gets executed inside the runtime successfully without
+/// panicking.
+/// 
+/// [`Sleep`]: struct@crate::time::Sleep
+/// [`interval`]: crate::time::interval()
+/// [`Builder::enable_time`]: crate::runtime::Builder::enable_time
+/// [`Builder::enable_all`]: crate::runtime::Builder::enable_all
+#[cfg_attr(docsrs, doc(alias = "delay_for"))]
+#[cfg_attr(docsrs, doc(alias = "wait"))]
+#[track_caller]
+pub fn sleep(duration: Duration) -> Sleep {
+ let location = trace::caller_location();
+ match Instant::now().checked_add(duration) { Some(deadline) => Sleep::new_timeout(deadline, location), None => Sleep::new_timeout(Instant::far_future(), location) }
+}
+
+pin_project ! { #[doc = " Future returned by [`sleep`](sleep) and [`sleep_until`](sleep_until)."] #[doc = ""] #[doc = " This type does not implement the `Unpin` trait, which means that if you"] #[doc = " use it with [`select!`] or by calling `poll`, you have to pin it first."] #[doc = " If you use it with `.await`, this does not apply."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = " Wait 100ms and print \"100 ms have elapsed\"."] #[doc = ""] #[doc = " ```"] #[doc = " use tokio::time::{sleep, Duration};"] #[doc = ""] #[doc = " # #[tokio::main(flavor = \"current_thread\")]"] #[doc = " # async fn main() {"] #[doc = " sleep(Duration::from_millis(100)).await;"] #[doc = " println!(\"100 ms have elapsed\");"] #[doc = " # }"] #[doc = " ```"] #[doc = ""] #[doc = " Use with [`select!`]. Pinning the `Sleep` with [`tokio::pin!`] is"] #[doc = " necessary when the same `Sleep` is selected on multiple times."] #[doc = " ```no_run"] #[doc = " use tokio::time::{self, Duration, Instant};"] #[doc = ""] #[doc = " # #[tokio::main(flavor = \"current_thread\")]"] #[doc = " # async fn main() {"] #[doc = " let sleep = time::sleep(Duration::from_millis(10));"] #[doc = " tokio::pin!(sleep);"] #[doc = ""] #[doc = " loop {"] #[doc = " tokio::select! {"] #[doc = " () = &mut sleep => {"] #[doc = " println!(\"timer elapsed\");"] #[doc = " sleep.as_mut().reset(Instant::now() + Duration::from_millis(50));"] #[doc = " },"] #[doc = " }"] #[doc = " }"] #[doc = " # }"] #[doc = " ```"] #[doc = " Use in a struct with boxing. By pinning the `Sleep` with a `Box`, the"] #[doc = " `HasSleep` struct implements `Unpin`, even though `Sleep` does not."] #[doc = " ```"] #[doc = " use std::future::Future;"] #[doc = " use std::pin::Pin;"] #[doc = " use std::task::{Context, Poll};"] #[doc = " use tokio::time::Sleep;"] #[doc = ""] #[doc = " struct HasSleep {"] #[doc = " sleep: Pin<Box<Sleep>>,"] #[doc = " }"] #[doc = ""] #[doc = " impl Future for HasSleep {"] #[doc = " type Output = ();"] #[doc = ""] #[doc = " fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {"] #[doc = " self.sleep.as_mut().poll(cx)"] #[doc = " }"] #[doc = " }"] #[doc = " ```"] #[doc = " Use in a struct with pin projection. This method avoids the `Box`, but"] #[doc = " the `HasSleep` struct will not be `Unpin` as a consequence."] #[doc = " ```"] #[doc = " use std::future::Future;"] #[doc = " use std::pin::Pin;"] #[doc = " use std::task::{Context, Poll};"] #[doc = " use tokio::time::Sleep;"] #[doc = " use pin_project_lite::pin_project;"] #[doc = ""] #[doc = " pin_project! {"] #[doc = " struct HasSleep {"] #[doc = " #[pin]"] #[doc = " sleep: Sleep,"] #[doc = " }"] #[doc = " }"] #[doc = ""] #[doc = " impl Future for HasSleep {"] #[doc = " type Output = ();"] #[doc = ""] #[doc = " fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {"] #[doc = " self.project().sleep.poll(cx)"] #[doc = " }"] #[doc = " }"] #[doc = " ```"] #[doc = ""] #[doc = " [`select!`]: ../macro.select.html"] #[doc = " [`tokio::pin!`]: ../macro.pin.html"] #[project(! Unpin)] #[cfg_attr(docsrs, doc(alias = "Delay"))] #[derive(Debug)] #[must_use = "futures do nothing unless you `.await` or poll them"] pub struct Sleep { inner: Inner, #[pin] entry: Timer } }
+cfg_trace ! { #[derive(Debug)] struct Inner { ctx: trace::AsyncOpTracingCtx } }
+cfg_not_trace ! { #[derive(Debug)] struct Inner { } }
+impl Sleep {
+ fn new_timeout(deadline: Instant, location: Option<&Location<'static>>) -> Sleep {
+ use crate::runtime::scheduler;
+ let handle = scheduler::Handle::current();
+ let entry = Timer::new(handle, deadline);
+ let inner = { let handle = scheduler::Handle::current(); let clock = handle.driver().clock(); let handle = &handle.driver().time(); let time_source = handle.time_source(); let deadline_tick = time_source.deadline_to_tick(deadline); let duration = deadline_tick.saturating_sub(time_source.now(clock)); let location = location.expect("should have location if tracing"); let resource_span = tracing::trace_span!(parent: None, "runtime.resource", concrete_type = "Sleep", kind = "timer", loc.file = location.file(), loc.line = location.line(), loc.col = location.column() ); let async_op_span = resource_span.in_scope(| | { tracing::trace!(target: "runtime::resource::state_update", duration = duration, duration.unit = "ms", duration.op = "override" ); tracing::trace_span!("runtime.resource.async_op", source = "Sleep::new_timeout") }); let async_op_poll_span = async_op_span.in_scope(| | tracing::trace_span!("runtime.resource.async_op.poll")); let ctx = trace::AsyncOpTracingCtx { async_op_span, async_op_poll_span, resource_span }; Inner { ctx } };
+ let inner = Inner { };
+ Sleep { inner, entry }
+ }
+ 
+ fn far_future(location: Option<&Location<'static>>) -> Sleep {
+ Self::new_timeout(Instant::far_future(), location)
+ }
+ 
+ pub fn deadline(&self) -> Instant {
+ self.entry.deadline()
+ }
+ 
+ pub fn is_elapsed(&self) -> bool {
+ self.entry.is_elapsed()
+ }
+ 
+ pub fn reset(self, deadline: Instant) {
+ self.reset_inner(deadline);
+ }
+ 
+ fn reset_without_reregister(self, deadline: Instant) {
+ let mut me = self.project();
+ match me.entry.as_ref().flavor() { crate::runtime::TimerFlavor::Traditional => { me.entry.as_mut().reset(deadline, false); } #[cfg(all(tokio_unstable, feature = "rt-multi-thread"))] crate::runtime::TimerFlavor::Alternative => { let handle = me.entry.as_ref().scheduler_handle().clone(); me.entry.set(Timer::new(handle, deadline)); } }
+ }
+ 
+ fn reset_inner(self, deadline: Instant) {
+ let mut me = self.project();
+ match me.entry.as_ref().flavor() { crate::runtime::TimerFlavor::Traditional => { me.entry.as_mut().reset(deadline, true); } #[cfg(all(tokio_unstable, feature = "rt-multi-thread"))] crate::runtime::TimerFlavor::Alternative => { let handle = me.entry.as_ref().scheduler_handle().clone(); me.entry.set(Timer::new(handle, deadline)); } }
+ #[cfg(all(tokio_unstable, feature = "tracing"))] { let _resource_enter = me.inner.ctx.resource_span.enter(); me.inner.ctx.async_op_span = tracing::trace_span!("runtime.resource.async_op", source = "Sleep::reset"); let _async_op_enter = me.inner.ctx.async_op_span.enter(); me.inner.ctx.async_op_poll_span = tracing::trace_span!("runtime.resource.async_op.poll"); let duration = { let clock = me.entry.as_ref().clock(); let time_source = me.entry.as_ref().driver().time_source(); let now = time_source.now(clock); let deadline_tick = time_source.deadline_to_tick(deadline); deadline_tick.saturating_sub(now) }; tracing::trace!(target: "runtime::resource::state_update", duration = duration, duration.unit = "ms", duration.op = "override" ); }
+ }
+ 
+ fn poll_elapsed(self, cx: &mut task::Context<'_>) -> Poll<Result<(), Error>> {
+ let me = self.project();
+ ready!(crate::trace::trace_leaf(cx));
+ let coop = ready!(trace_poll_op!("poll_elapsed", crate::task::coop::poll_proceed(cx) ));
+ let coop = ready!(crate::task::coop::poll_proceed(cx));
+ let result = me.entry.poll_elapsed(cx).map(move | r | { coop.made_progress(); r });
+ #[cfg(all(tokio_unstable, feature = "tracing"))] return trace_poll_op!("poll_elapsed", result);
+ #[cfg(any(not(tokio_unstable), not(feature = "tracing")))] return result;
+ }
+ 
+}
+
+impl Future for Sleep {
+ type Output = ();
+ fn poll(self, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+ let _res_span = self.inner.ctx.resource_span.clone().entered();
+ let _ao_span = self.inner.ctx.async_op_span.clone().entered();
+ let _ao_poll_span = self.inner.ctx.async_op_poll_span.clone().entered();
+ match ready!(self.as_mut().poll_elapsed(cx)) { Ok(()) => Poll::Ready(()), Err(e) => panic!("timer error: {e}") }
+ }
+ 
+}
+

@@ -1,0 +1,13 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/loom/std/atomic_u64_static_const_new.rs
+
+use super::AtomicU64;
+use crate::loom::sync::Mutex;
+type StaticAtomicU64 = AtomicU64;
+
+impl AtomicU64 {
+ fn new(val: u64) -> Self {
+ Self { inner: Mutex::const_new(val) }
+ }
+ 
+}
+

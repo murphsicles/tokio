@@ -1,0 +1,266 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/signal/windows.rs
+
+use crate::signal::RxFuture;
+use std::io;
+use std::task::{ Context, Poll };
+#[cfg(windows)]
+#[path = "windows/sys.rs"]
+mod imp;
+#[cfg(not(windows))]
+#[path = "windows/stub.rs"]
+mod imp;
+/// Creates a new listener which receives "ctrl-c" notifications sent to the
+/// process.
+/// 
+/// # Examples
+/// 
+/// ```rust,no_run
+/// use tokio::signal::windows::ctrl_c;
+/// 
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // A listener of CTRL-C events.
+/// let mut signal = ctrl_c()?;
+/// 
+/// // Print whenever a CTRL-C event is received.
+/// for countdown in(0..3).rev() {
+/// signal.recv().await;
+/// println!("got CTRL-C. {} more to exit", countdown);
+/// }
+/// 
+/// Ok(())
+/// }
+/// ```
+pub fn ctrl_c() -> io::Result<CtrlC> {
+ Ok(CtrlC { inner: self::imp::ctrl_c() ? })
+}
+
+/// Represents a listener which receives "ctrl-c" notifications sent to the process
+/// via `SetConsoleCtrlHandler`.
+/// 
+/// This event can be turned into a `Stream` using [`CtrlCStream`].
+/// 
+/// [`CtrlCStream`]: https://docs.rs/tokio-stream/latest/tokio_stream/wrappers/struct.CtrlCStream.html
+/// 
+/// A notification to this process notifies *all* receivers for
+/// this event. Moreover, the notifications **are coalesced**if they aren't processed
+/// quickly enough. This means that if two notifications are received back-to-back,
+/// then the listener may only receive one item about the two notifications.
+#[must_use = "listeners do nothing unless polled"]
+#[derive(Debug)]
+pub struct CtrlC {
+ inner: RxFuture,
+}
+
+impl CtrlC {
+ pub fn recv(&mut self) -> Option<()> {
+ self.inner.recv().await;
+ Some(())
+ }
+ 
+ pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<()>> {
+ self.inner.poll_recv(cx).map(Some)
+ }
+ 
+}
+
+/// Represents a listener which receives "ctrl-break" notifications sent to the process
+/// via `SetConsoleCtrlHandler`.
+/// 
+/// This listener can be turned into a `Stream` using [`CtrlBreakStream`].
+/// 
+/// [`CtrlBreakStream`]: https://docs.rs/tokio-stream/latest/tokio_stream/wrappers/struct.CtrlBreakStream.html
+/// 
+/// A notification to this process notifies *all* receivers for
+/// this event. Moreover, the notifications **are coalesced**if they aren't processed
+/// quickly enough. This means that if two notifications are received back-to-back,
+/// then the listener may only receive one item about the two notifications.
+#[must_use = "listeners do nothing unless polled"]
+#[derive(Debug)]
+pub struct CtrlBreak {
+ inner: RxFuture,
+}
+
+impl CtrlBreak {
+ pub fn recv(&mut self) -> Option<()> {
+ self.inner.recv().await;
+ Some(())
+ }
+ 
+ pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<()>> {
+ self.inner.poll_recv(cx).map(Some)
+ }
+ 
+}
+
+/// Creates a new listener which receives "ctrl-break" notifications sent to the
+/// process.
+/// 
+/// # Examples
+/// 
+/// ```rust,no_run
+/// use tokio::signal::windows::ctrl_break;
+/// 
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // A listener of CTRL-BREAK events.
+/// let mut signal = ctrl_break()?;
+/// 
+/// // Print whenever a CTRL-BREAK event is received.
+/// loop {
+/// signal.recv().await;
+/// println!("got signal CTRL-BREAK");
+/// }
+/// }
+/// ```
+pub fn ctrl_break() -> io::Result<CtrlBreak> {
+ Ok(CtrlBreak { inner: self::imp::ctrl_break() ? })
+}
+
+/// Creates a new listener which receives "ctrl-close" notifications sent to the
+/// process.
+/// 
+/// # Examples
+/// 
+/// ```rust,no_run
+/// use tokio::signal::windows::ctrl_close;
+/// 
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // A listener of CTRL-CLOSE events.
+/// let mut signal = ctrl_close()?;
+/// 
+/// // Print whenever a CTRL-CLOSE event is received.
+/// for countdown in(0..3).rev() {
+/// signal.recv().await;
+/// println!("got CTRL-CLOSE. {} more to exit", countdown);
+/// }
+/// 
+/// Ok(())
+/// }
+/// ```
+pub fn ctrl_close() -> io::Result<CtrlClose> {
+ Ok(CtrlClose { inner: self::imp::ctrl_close() ? })
+}
+
+/// Represents a listener which receives "ctrl-close" notifications sent to the process
+/// via `SetConsoleCtrlHandler`.
+/// 
+/// A notification to this process notifies *all* listeners listening for
+/// this event. Moreover, the notifications **are coalesced**if they aren't processed
+/// quickly enough. This means that if two notifications are received back-to-back,
+/// then the listener may only receive one item about the two notifications.
+#[must_use = "listeners do nothing unless polled"]
+#[derive(Debug)]
+pub struct CtrlClose {
+ inner: RxFuture,
+}
+
+impl CtrlClose {
+ pub fn recv(&mut self) -> Option<()> {
+ self.inner.recv().await;
+ Some(())
+ }
+ 
+ pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<()>> {
+ self.inner.poll_recv(cx).map(Some)
+ }
+ 
+}
+
+/// Creates a new listener which receives "ctrl-shutdown" notifications sent to the
+/// process.
+/// 
+/// # Examples
+/// 
+/// ```rust,no_run
+/// use tokio::signal::windows::ctrl_shutdown;
+/// 
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // A listener of CTRL-SHUTDOWN events.
+/// let mut signal = ctrl_shutdown()?;
+/// 
+/// signal.recv().await;
+/// println!("got CTRL-SHUTDOWN. Cleaning up before exiting");
+/// 
+/// Ok(())
+/// }
+/// ```
+pub fn ctrl_shutdown() -> io::Result<CtrlShutdown> {
+ Ok(CtrlShutdown { inner: self::imp::ctrl_shutdown() ? })
+}
+
+/// Represents a listener which receives "ctrl-shutdown" notifications sent to the process
+/// via `SetConsoleCtrlHandler`.
+/// 
+/// A notification to this process notifies *all* listeners listening for
+/// this event. Moreover, the notifications **are coalesced**if they aren't processed
+/// quickly enough. This means that if two notifications are received back-to-back,
+/// then the listener may only receive one item about the two notifications.
+#[must_use = "listeners do nothing unless polled"]
+#[derive(Debug)]
+pub struct CtrlShutdown {
+ inner: RxFuture,
+}
+
+impl CtrlShutdown {
+ pub fn recv(&mut self) -> Option<()> {
+ self.inner.recv().await;
+ Some(())
+ }
+ 
+ pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<()>> {
+ self.inner.poll_recv(cx).map(Some)
+ }
+ 
+}
+
+/// Creates a new listener which receives "ctrl-logoff" notifications sent to the
+/// process.
+/// 
+/// # Examples
+/// 
+/// ```rust,no_run
+/// use tokio::signal::windows::ctrl_logoff;
+/// 
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // A listener of CTRL-LOGOFF events.
+/// let mut signal = ctrl_logoff()?;
+/// 
+/// signal.recv().await;
+/// println!("got CTRL-LOGOFF. Cleaning up before exiting");
+/// 
+/// Ok(())
+/// }
+/// ```
+pub fn ctrl_logoff() -> io::Result<CtrlLogoff> {
+ Ok(CtrlLogoff { inner: self::imp::ctrl_logoff() ? })
+}
+
+/// Represents a listener which receives "ctrl-logoff" notifications sent to the process
+/// via `SetConsoleCtrlHandler`.
+/// 
+/// A notification to this process notifies *all* listeners listening for
+/// this event. Moreover, the notifications **are coalesced**if they aren't processed
+/// quickly enough. This means that if two notifications are received back-to-back,
+/// then the listener may only receive one item about the two notifications.
+#[must_use = "listeners do nothing unless polled"]
+#[derive(Debug)]
+pub struct CtrlLogoff {
+ inner: RxFuture,
+}
+
+impl CtrlLogoff {
+ pub fn recv(&mut self) -> Option<()> {
+ self.inner.recv().await;
+ Some(())
+ }
+ 
+ pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<()>> {
+ self.inner.poll_recv(cx).map(Some)
+ }
+ 
+}
+

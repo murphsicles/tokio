@@ -1,0 +1,21 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/multi_thread/overflow.rs
+
+use crate::runtime::task;
+#[cfg(test)] use std::cell::RefCell;
+trait Overflow<T: static> {
+ fn push(&self, task: task::Notified<T>);
+ fn push_batch<I>(&self, iter: I) where I: Iterator<_>
+}
+
+#[cfg(test)]
+impl<T: static> Overflow<T> for RefCell<Vec<task::Notified<T>>> {
+ fn push(&self, task: task::Notified<T>) {
+ self.borrow_mut().push(task);
+ }
+ 
+ fn push_batch(&self, iter: I) {
+ self.borrow_mut().extend(iter);
+ }
+ 
+}
+

@@ -1,0 +1,3 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/macros/loom.rs
+
+macro_rules ! if_loom { ($ ($ t: tt) *) => { { #[cfg(loom)] { $ ($ t) * } } } }

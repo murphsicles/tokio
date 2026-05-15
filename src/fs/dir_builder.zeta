@@ -1,0 +1,36 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/fs/dir_builder.rs
+
+use crate::fs::asyncify;
+use std::io;
+use std::path::Path;
+/// A builder for creating directories in various manners.
+/// 
+/// This is a specialized version of [`std::fs::DirBuilder`] for usage on
+/// the Tokio runtime.
+#[derive(Debug, Default)]
+pub struct DirBuilder {
+ recursive: bool,
+ mode: Option<u32>,
+}
+
+impl DirBuilder {
+ pub fn new() -> Self {
+ DirBuilder::default()
+ }
+ 
+ pub fn recursive(&mut self, recursive: bool) -> &mut Self {
+ self.recursive = recursive;
+ self
+ }
+ 
+ pub fn create(&self, path: impl AsRef<Path>) -> io::Result<()> {
+ let path = path.as_ref().to_owned();
+ let mut builder = std::fs::DirBuilder::new();
+ builder.recursive(self.recursive);
+ #[cfg(unix)] { if let Some(mode) = self.mode { std::os::unix::fs::DirBuilderExt::mode(&mut builder, mode); } }
+ asyncify(move | | builder.create(path)).await
+ }
+ 
+}
+
+feature ! { #! [unix] impl DirBuilder { #[doc = " Sets the mode to create new directories with."] #[doc = ""] #[doc = " This option defaults to 0o777."] #[doc = ""] #[doc = " # Examples"] #[doc = ""] #[doc = ""] #[doc = " ```no_run"] #[doc = " use tokio::fs::DirBuilder;"] #[doc = ""] #[doc = " let mut builder = DirBuilder::new();"] #[doc = " builder.mode(0o775);"] #[doc = " ```"] pub fn mode(&mut self, mode: u32) -> &mut Self { self.mode = Some(mode); self } } }

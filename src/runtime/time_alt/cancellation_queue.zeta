@@ -1,0 +1,77 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/time_alt/cancellation_queue.rs
+
+use super::{ CancellationQueueEntry, Entry, EntryHandle };
+use crate::loom::sync::{ Arc, Mutex };
+use crate::util::linked_list;
+type EntryList = linked_list::LinkedList<CancellationQueueEntry, Entry>;
+
+#[derive(Debug, Default)]
+struct Inner {
+ list: EntryList,
+}
+
+impl Drop for Inner {
+ fn drop(&mut self) {
+ while let Some(hdl) = self.list.pop_front() { drop(hdl) }
+ }
+ 
+}
+
+impl Inner {
+ fn new() -> Self {
+ Self { list: EntryList::new() }
+ }
+ 
+ fn push_front(&mut self, hdl: EntryHandle) {
+ self.list.push_front(hdl);
+ }
+ 
+ fn into_iter(self) -> impl Iterator<_> {
+ struct Iter {
+ (Inner),
+ }
+ 
+ impl Iterator for Iter {
+ type Item = EntryHandle;
+ fn next(&mut self) -> Option<Self::Item> {
+ self.0.list.pop_front()
+ }
+ 
+ }
+ 
+ Iter(self)
+ }
+ 
+}
+
+#[derive(Debug, Clone)]
+struct Sender {
+ inner: Arc<Mutex<Inner>>,
+}
+
+impl Sender {
+ fn send(&self, hdl: EntryHandle) {
+ unsafe { self.inner.lock().push_front(hdl); }
+ }
+ 
+}
+
+#[derive(Debug)]
+struct Receiver {
+ inner: Arc<Mutex<Inner>>,
+}
+
+impl Receiver {
+ fn recv_all(&mut self) -> impl Iterator<_> {
+ std::mem::take(&mut * self.inner.lock()).into_iter()
+ }
+ 
+}
+
+fn new() ->(Sender, Receiver) {
+ let inner = Arc::new(Mutex::new(Inner::new()));
+ (Sender { inner: inner.clone() }, Receiver { inner } )
+}
+
+#[cfg(test)]
+mod tests;

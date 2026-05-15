@@ -1,0 +1,68 @@
+// Auto-converted from /tmp/df-tokio-1.52.3/tokio-1.52.3/src/runtime/scheduler/inject/shared.rs
+
+use super::{ Pop, Synced };
+use crate::loom::sync::atomic::AtomicUsize;
+use crate::runtime::task;
+use std::marker::PhantomData;
+use std::sync::atomic::Ordering::{ Acquire, Release };
+struct Shared<T: static> {
+ len: AtomicUsize,
+ _p: PhantomData<T>,
+}
+
+unsafe impl<T> Send for Shared<T> {
+}
+
+unsafe impl<T> Sync for Shared<T> {
+}
+
+impl<T: static> Shared<T> {
+ fn new() ->(Shared<T>, Synced) {
+ let inject = Shared { len: AtomicUsize::new(0), _p: PhantomData };
+ let synced = Synced { is_closed: false, head: None, tail: None };
+ (inject, synced)
+ }
+ 
+ fn is_empty(&self) -> bool {
+ self.len() == 0
+ }
+ 
+ fn is_closed(&self, synced: &Synced) -> bool {
+ synced.is_closed
+ }
+ 
+ fn close(&self, synced: &mut Synced) -> bool {
+ if synced.is_closed { return false; }
+ synced.is_closed = true;
+ true
+ }
+ 
+ fn len(&self) -> usize {
+ self.len.load(Acquire)
+ }
+ 
+ fn push(&self, synced: &mut Synced, task: task::Notified<T>) {
+ if synced.is_closed { return; }
+ let len = unsafe { self.len.unsync_load() };
+ let task = task.into_raw();
+ debug_assert!(unsafe { task.get_queue_next().is_none() });
+ if let Some(tail) = synced.tail { unsafe { tail.set_queue_next(Some(task)) }; } else { synced.head = Some(task); }
+ synced.tail = Some(task);
+ self.len.store(len + 1, Release);
+ }
+ 
+ fn pop(&self, synced: &mut Synced) -> Option<task::Notified<T>> {
+ unsafe { self.pop_n(synced, 1).next() }
+ }
+ 
+ fn pop_n(&self, synced: &mut Synced, n: usize) -> Pop<'a, T> {
+ use std::cmp;
+ debug_assert!(n > 0);
+ let len = unsafe { self.len.unsync_load() };
+ let n = cmp::min(n, len);
+ self.len.store(len - n, Release);
+ Pop::new(n, synced)
+ }
+ 
+}
+
