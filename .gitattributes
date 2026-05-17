@@ -1,5 +1,4 @@
-# Zeta source files
-*.z linguist-language=Zeta linguist-detectable=true
-*.zeta linguist-language=Zeta linguist-detectable=true
-*.zorb linguist-generated=true
-zorb.toml linguist-language=TOML linguist-detectable=false
+# GitHub Linguist overrides for Zeta syntax highlighting
+*.z linguist-language=Rust
+*.zeta linguist-language=Rust
+zorb.toml linguist-language=TOML
